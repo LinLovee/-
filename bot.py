@@ -1,4 +1,8 @@
+import asyncio
 import os
+import sqlite3
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from dotenv import load_dotenv
 from telegram import Update
@@ -24,9 +28,42 @@ from game import (
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DB_PATH = os.getenv("DB_PATH", "game.db")
+DB_PATH = os.getenv("DB_PATH", "/tmp/game.db")
 
-db = GameDB(DB_PATH)
+
+def init_db() -> GameDB:
+    try:
+        return GameDB(DB_PATH)
+    except sqlite3.OperationalError as err:
+        fallback_path = "/tmp/game.db"
+        print(f"Не удалось открыть БД по пути '{DB_PATH}': {err}")
+        print(f"Переключаюсь на временную БД: {fallback_path}")
+        return GameDB(fallback_path)
+
+
+db = init_db()
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, format, *args):  # noqa: A003
+        return
+
+
+def run_health_server_if_needed() -> None:
+    port_raw = os.getenv("PORT")
+    if not port_raw:
+        return
+    port = int(port_raw)
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"Healthcheck server started on port {port}")
 
 
 async def ensure_player(update: Update):
@@ -218,6 +255,9 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("Не найден BOT_TOKEN в переменных окружения")
+
+    run_health_server_if_needed()
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
