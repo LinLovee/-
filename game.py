@@ -369,28 +369,52 @@ def do_hunt(player: Player, style: str = "balanced") -> str:
 
 def eat_human(player: Player) -> str:
     player.last_eat_at = datetime.now(UTC).isoformat()
+    scene = random.choice([
+        "ночной двор у старой клиники",
+        "пустая станция метро после комендантского часа",
+        "темный переход около кофейни Anteiku",
+    ])
+    approach = random.choice([
+        "тихий подкрад",
+        "жесткий рывок",
+        "ложная приманка",
+    ])
+
     danger_roll = random.random()
-    gained_rc = random.randint(15, 40)
-    gained_exp = random.randint(12, 26)
+    gained_rc = random.randint(18, 44)
+    gained_exp = random.randint(14, 30)
     player.rc_cells += gained_rc
     player.exp += gained_exp
     player.humans_eaten += 1
 
-    if danger_roll < 0.25:
-        damage = random.randint(8, 22)
-        player.hp = max(1, player.hp - damage)
-        base_result = f"🚨 Засада CCG! Получен урон: {damage}."
+    side_event_roll = random.random()
+    if side_event_roll < 0.25:
+        bonus = random.randint(18, 45)
+        player.yen += bonus
+        side_event = f"💼 В кармане жертвы найдено +{bonus} ¥."
+    elif side_event_roll < 0.5:
+        bonus = random.randint(6, 16)
+        player.hp = min(player.max_hp, player.hp + bonus)
+        side_event = f"🧪 Ты поглотил чистые RC: +{bonus} HP восстановления."
     else:
-        heal = random.randint(6, 18)
+        side_event = "🌫 Следов почти не осталось — тихий отход."
+
+    if danger_roll < 0.3:
+        damage = random.randint(10, 24)
+        player.hp = max(1, player.hp - damage)
+        conflict = f"🚨 Засада CCG! Урон: -{damage} HP."
+    else:
+        heal = random.randint(8, 20)
         player.hp = min(player.max_hp, player.hp + heal)
-        base_result = f"🩸 Охота прошла чисто. Восстановлено {heal} HP."
+        conflict = f"🩸 Охота прошла чисто. Регенерация: +{heal} HP."
 
     level_message = apply_level_up(player)
     return (
-        f"🍖 Ты пожираешь человека. +{gained_rc} RC, +{gained_exp} EXP.\n"
-        f"{base_result}\n"
-        f"Всего жертв: {player.humans_eaten}.\n"
-        f"❤️ HP: {player.hp}/{player.max_hp}.\n"
+        f"🍖 Локация: {scene}. Тактика: {approach}.\n"
+        f"🧬 Поглощение: +{gained_rc} RC, +{gained_exp} EXP.\n"
+        f"{conflict}\n"
+        f"{side_event}\n"
+        f"📊 Всего жертв: {player.humans_eaten}. HP: {player.hp}/{player.max_hp}.\n"
         f"{level_message}".strip()
     )
 
@@ -436,19 +460,49 @@ def raid_district(player: Player, style: str = "assault") -> str:
 
 
 def train(player: Player) -> str:
-    cost = 30
+    base_cost = 30
+    intensity = random.choice([
+        ("лёгкий спарринг", 1.0),
+        ("жесткий тренировочный бой", 1.35),
+        ("экстремальный режим", 1.7),
+    ])
+    title, mult = intensity
+    cost = int(base_cost * mult)
+
     if player.yen < cost:
-        return f"❌ Нужно {cost} ¥ для тренировки. У тебя: {player.yen} ¥."
+        return f"❌ Тренировка «{title}» стоит {cost} ¥. У тебя: {player.yen} ¥."
 
     player.yen -= cost
-    player.strength += random.randint(1, 2)
-    player.stamina += random.randint(1, 2)
-    player.max_hp += random.randint(2, 5)
+    strength_gain = random.randint(1, 2) + (1 if mult > 1.3 else 0)
+    stamina_gain = random.randint(1, 2) + (1 if mult > 1.5 else 0)
+    hp_gain = random.randint(3, 6) + (2 if mult > 1.5 else 0)
+    exp_gain = random.randint(12, 28)
+
+    player.strength += strength_gain
+    player.stamina += stamina_gain
+    player.max_hp += hp_gain
     player.hp = player.max_hp
+    player.exp += exp_gain
+
+    combo_event = random.random()
+    if combo_event < 0.2:
+        rc_bonus = random.randint(5, 12)
+        player.rc_cells += rc_bonus
+        extra = f"🧬 За идеальную серию: +{rc_bonus} RC."
+    elif combo_event < 0.45:
+        yen_refund = random.randint(8, 18)
+        player.yen += yen_refund
+        extra = f"💴 Ставка со спарринг-партнёром: возврат {yen_refund} ¥."
+    else:
+        extra = "🔥 Безупречно отработана техника кагуне."
+
+    level_message = apply_level_up(player)
     return (
-        "💪 Тренировка завершена!\n"
-        f"Сила: {player.strength}, Выносливость: {player.stamina}.\n"
-        f"❤️ HP: {player.hp}/{player.max_hp}."
+        f"💪 Тренировка: {title}. Стоимость: {cost} ¥.\n"
+        f"📈 Прирост: +{strength_gain} STR, +{stamina_gain} STA, +{hp_gain} max HP, +{exp_gain} EXP.\n"
+        f"{extra}\n"
+        f"❤️ HP: {player.hp}/{player.max_hp}. Баланс: {player.yen} ¥.\n"
+        f"{level_message}".strip()
     )
 
 
@@ -494,20 +548,38 @@ def gacha_pull(player: Player) -> str:
         player.rc_cells += 35
         return "🌟 LEGENDARY: Маска Одноглазого Короля! +5 STR, +5 STA, +20 HP, +35 RC."
 
-    if roll < 0.20:
-        bonus = random.randint(12, 25)
+    if roll < 0.18:
+        bonus = random.randint(18, 34)
         player.rc_cells += bonus
-        return f"✨ EPIC: Ампула RC. +{bonus} RC клеток."
+        return f"✨ EPIC: Контейнер RC-сыворотки. +{bonus} RC клеток."
 
-    if roll < 0.55:
-        bonus = random.randint(25, 70)
-        player.yen += bonus
-        return f"🔷 RARE: Контракт подполья. Возврат +{bonus} ¥."
+    if roll < 0.50:
+        yen_bonus = random.randint(40, 95)
+        exp_bonus = random.randint(10, 24)
+        player.yen += yen_bonus
+        player.exp += exp_bonus
+        level_message = apply_level_up(player)
+        return (
+            f"🔷 RARE: Подпольный контракт. +{yen_bonus} ¥, +{exp_bonus} EXP.\n"
+            f"{level_message}".strip()
+        )
 
-    bonus = random.randint(8, 20)
-    player.exp += bonus
+    item = random.choice([
+        "стальной наруч",
+        "тактическая маска",
+        "бустер-ампула",
+        "черный плащ налётчика",
+    ])
+    exp_bonus = random.randint(12, 24)
+    hp_bonus = random.randint(3, 10)
+    player.exp += exp_bonus
+    player.hp = min(player.max_hp, player.hp + hp_bonus)
     level_message = apply_level_up(player)
-    return f"▫️ COMMON: Боевой опыт +{bonus} EXP.\n{level_message}".strip()
+    return (
+        f"▫️ COMMON: {item}.\n"
+        f"+{exp_bonus} EXP, +{hp_bonus} HP.\n"
+        f"{level_message}".strip()
+    )
 
 
 def pvp_attack(attacker: Player, defender: Player) -> str:
