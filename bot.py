@@ -390,10 +390,10 @@ async def try_join_raid(player_id: int, token: str) -> tuple[bool, str]:
     return False, "В этом рейде уже есть 2 участника."
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def create_player_from_choice(update: Update, kagune_key: str) -> str:
     user = update.effective_user
-    if user is None or update.message is None:
-        return
+    if user is None:
+        return "Ошибка: пользователь не найден."
 
     if context.args:
         arg = context.args[0]
@@ -701,16 +701,19 @@ async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def eat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     player = await ensure_player(update)
-    if not player or update.message is None:
-        await update.message.reply_text("Сначала создай персонажа: /start")
-        return
+    if not player:
+        return "Сначала создай персонажа: /start"
 
-    allowed, cooldown_text = can_eat_human(player)
+    if player.user_id in RAID_SESSIONS:
+        return "Ты уже в рейде. Заверши текущий бой."
+
+    allowed, cooldown_text = can_raid(player)
     if not allowed:
-        await update.message.reply_text(cooldown_text)
-        return
+        return cooldown_text
 
-    result = eat_human(player)
+    player.last_raid_at = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+    session = _init_combat_session(player, "raid")
+    RAID_SESSIONS[player.user_id] = session
     db.save_player(player)
     await update.message.reply_text(result, reply_markup=main_keyboard())
 
@@ -726,11 +729,51 @@ async def raid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not player:
         await update.message.reply_text("Сначала создай персонажа: /start")
         return
+    await update.message.reply_text(render_profile(player), reply_markup=main_keyboard())
+
+    if action == "def" and session["phase"] == "defense":
+        defend_text = _apply_enemy_attack(player, session, zone)
+        session["phase"] = "attack"
+        session["turn"] += 1
+
+        if player.hp <= 1:
+            sessions.pop(player.user_id, None)
+            db.save_player(player)
+            if query.message is not None:
+                await query.message.reply_text(
+                    f"{defend_text}\n\n💀 Ты еле выжил и отступил. Бой завершен.",
+                    reply_markup=main_keyboard(),
+                )
+            return
+
+        db.save_player(player)
+        if query.message is not None:
+            await query.message.reply_text(
+                f"{defend_text}\n\n{_combat_status(player, session)}\n"
+                "Твой ход — выбери удар:",
+                reply_markup=attack_keyboard(mode),
+            )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    text = (
+        "📘 Команды:\n"
+        "• 👤 Профиль\n"
+        "• 🗡 Охота — пошаговый бой с NPC\n"
+        "• 🚨 Рейд — тяжелый пошаговый бой\n"
+        "• 🍖 Пожирание, 💪 тренировка, 🎰 гача\n"
+        "• ⚔️ Дуэль — очередь на PvP"
+    )
+    await update.message.reply_text(text, reply_markup=main_keyboard())
 
     lobby_data = await create_raid_lobby(update, context)
     if lobby_data is None:
         await update.message.reply_text("Не удалось создать рейд.")
         return
+    text = await start_hunt(update)
+    await update.message.reply_text(text, reply_markup=attack_keyboard("hunt"))
 
     token, kb = lobby_data
     lobby = RAID_LOBBIES[token]
@@ -780,10 +823,10 @@ async def evolve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def gacha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    player = await ensure_player(update)
-    if not player or update.message is None:
-        await update.message.reply_text("Сначала создай персонажа: /start")
+    if update.message is None:
         return
+    result = await run_gacha(update)
+    await reply_with_menu(update, result)
 
     if context.args:
         result = gacha_pull(player, context.args[0])
