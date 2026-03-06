@@ -11,3 +11,5 @@ services:
         sync: false
       - key: DB_PATH
         value: /tmp/game.db
+      - key: PYTHON_VERSION
+        value: 3.13.4
