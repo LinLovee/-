@@ -52,6 +52,76 @@ def init_db() -> GameDB:
         return GameDB(fallback_path)
 
 
+db = init_db()
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, format, *args):  # noqa: A003
+        return
+
+
+def run_health_server_if_needed() -> None:
+    port_raw = os.getenv("PORT")
+    if not port_raw:
+        return
+
+    try:
+        port = int(port_raw)
+    except ValueError:
+        print(f"Некорректный PORT: {port_raw}. Healthcheck сервер не запущен.")
+        return
+
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"Healthcheck server started on port {port}")
+
+
+def ensure_event_loop() -> None:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+def main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            ["👤 Профиль", "🏆 Топ игроков"],
+            ["🗡 Охота: Агрессия", "🎯 Охота: Стелс", "⚖️ Охота: Баланс"],
+            ["🚨 Рейд: Штурм", "🧨 Рейд: Саботаж", "👁 Рейд: Разведка"],
+            ["🍖 Пожирание", "💪 Тренировка", "🎰 Гача"],
+            ["⚔️ Найти дуэль", "❌ Выйти из дуэли", "ℹ️ Помощь"],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def actions_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🗡 Агрессия", callback_data="act:hunt:aggressive")],
+            [InlineKeyboardButton("🎯 Стелс", callback_data="act:hunt:stealth")],
+            [InlineKeyboardButton("⚖️ Баланс", callback_data="act:hunt:balanced")],
+            [InlineKeyboardButton("🚨 Штурм", callback_data="act:raid:assault")],
+            [InlineKeyboardButton("🧨 Саботаж", callback_data="act:raid:sabotage")],
+            [InlineKeyboardButton("👁 Разведка", callback_data="act:raid:scout")],
+            [InlineKeyboardButton("🍖 Пожирание", callback_data="act:eat")],
+            [InlineKeyboardButton("💪 Тренировка", callback_data="act:train")],
+            [InlineKeyboardButton("🎰 Гача", callback_data="act:gacha")],
+            [InlineKeyboardButton("⚔️ Дуэль", callback_data="act:duel")],
+        ]
+    )
+
+
+
+
 
 
 db = init_db()
@@ -216,6 +286,9 @@ async def create_player_from_choice(update: Update, kagune_key: str) -> str:
     user = update.effective_user
     if user is None:
         return "Ошибка: пользователь не найден."
+    user = update.effective_user
+    if user is None:
+        return "Ошибка: пользователь не найден."
 
     existing = db.get_player(user.id)
     if existing:
@@ -251,6 +324,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     existing = db.get_player(user.id)
     if existing:
         return "Ты уже в игре. Нажми «👤 Профиль» и продолжай прогрессию."
+
+    username = user.username or user.full_name
+    player = db.create_player(user.id, username, kagune_key)
+    return (
+        "✅ *Персонаж создан!*\n"
+        f"Кагуне: *{player.kagune}*\n"
+        "Тебе открыто главное меню действий.\n"
+        "Начни с кнопки охоты или нажми «⚔️ Найти дуэль»."
+    )
 
     username = user.username or user.full_name
     player = db.create_player(user.id, username, kagune_key)
@@ -434,6 +516,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if query.data.startswith("act:"):
         parts = query.data.split(":")
+        if len(parts) < 2:
+            return
+
+        action = parts[1]
+        result = ""
+        if action == "hunt" and len(parts) >= 3:
+            result = await run_hunt(update, parts[2])
+        elif action == "raid" and len(parts) >= 3:
         action = parts[1]
         result = ""
         if action == "hunt":
@@ -477,6 +567,16 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Сначала создай персонажа: /start")
         return
     await update.message.reply_text(render_profile(player), reply_markup=main_keyboard())
+
+
+async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    style = normalize_hunt_style(context.args[0] if context.args else None)
+    result = await run_hunt(update, style)
+    await update.message.reply_text(result, reply_markup=main_keyboard())
+
+
 
 
 async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -607,8 +707,8 @@ async def duel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     DUEL_QUEUE.remove(opponent_id)
     opponent = db.get_player(opponent_id)
     if not opponent:
-        await message.reply_text("Соперник исчез из базы. Нажми «⚔️ Найти дуэль» ещё раз.")
-        await update.message.reply_text("Соперник исчез из базы. Нажми /duel ещё раз.")
+        await message.reply_text("Соперник исчез!Нажми «⚔️ Найти дуэль» ещё раз.")
+        await update.message.reply_text("Соперник исчез! Нажми /duel ещё раз.")
         return
 
     result_for_attacker = pvp_attack(player, opponent)
