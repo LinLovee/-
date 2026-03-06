@@ -43,17 +43,22 @@
    python bot.py
    ```
 
-## Деплой на Render.com
-Рекомендуется хостинг как **Background Worker**.
+## Деплой на Render.com (без платного worker)
+Можно запустить на бесплатном **Web Service**.
 
-1. Создайте `Background Worker` в Render.
+1. Создайте `Web Service` в Render.
 2. Build Command: `pip install -r requirements.txt`
 3. Start Command: `python bot.py`
 4. Установите env-переменные:
    - `BOT_TOKEN`
-   - `DB_PATH=/var/data/game.db`
-5. Подключите **Persistent Disk** для сохранения SQLite между рестартами.
+   - `DB_PATH=/tmp/game.db`
+
+5. (Рекомендуется) Добавьте `runtime.txt` с фиксированной версией Python `3.13.x`, чтобы избежать несовместимости с Python 3.14 в некоторых версиях зависимостей.
+6. После деплоя проверьте логи: должна появиться строка `Healthcheck server started on port ...`.
+
+Важно: `/tmp` в free web-service **непостоянный** (база может очищаться после перезапуска/сна сервиса).
+Если нужна постоянная SQLite-база, потребуется платный диск/worker или внешняя БД.
 
 ## Переменные окружения
 - `BOT_TOKEN` — токен Telegram-бота.
-- `DB_PATH` — путь к SQLite базе (по умолчанию `game.db`).
+- `DB_PATH` — путь к SQLite базе (по умолчанию `/tmp/game.db`).

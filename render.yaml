@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: govno-afaoni-bot
     env: python
     plan: free
@@ -10,4 +10,4 @@ services:
       - key: BOT_TOKEN
         sync: false
       - key: DB_PATH
-        value: /var/data/game.db
+        value: /tmp/game.db
