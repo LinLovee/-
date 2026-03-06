@@ -293,6 +293,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_keyboard())
             return
 
+    if context.args:
+        kagune_key = normalize_kagune_key(context.args[0])
+        if kagune_key and kagune_key in KAGUNE_TYPES:
+            text = await create_player_from_choice(update, kagune_key)
+            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_keyboard())
+            return
+
     existing = db.get_player(user.id)
     if existing:
         await update.message.reply_text("С возвращением. Меню ниже.", reply_markup=main_keyboard())
@@ -316,6 +323,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if query.data is None:
         return
+    await query.answer()
 
     if query.data.startswith("pick:"):
         kagune_key = query.data.split(":", maxsplit=1)[1]
@@ -400,17 +408,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     await update.message.reply_text(text, reply_markup=main_keyboard())
 
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        return
 
-async def run_hunt(update: Update, style: str) -> str:
+    mode, action, zone = parts
     player = await ensure_player(update)
     if not player or update.message is None:
         await update.message.reply_text("Сначала создай персонажа: /start")
         return
     await update.message.reply_text(render_profile(player), reply_markup=main_keyboard())
 
-    allowed, cooldown_text = can_hunt(player)
-    if not allowed:
-        return cooldown_text
+    sessions = HUNT_SESSIONS if mode == "hunt" else RAID_SESSIONS
+    session = sessions.get(player.user_id)
+    if not session:
+        if query.message is not None:
+            await query.message.reply_text("Бой не найден. Запусти заново через меню.")
+        return
 
 async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
@@ -419,7 +433,7 @@ async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(text, reply_markup=attack_keyboard("hunt"))
 
 
-async def run_eat(update: Update) -> str:
+async def eat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     player = await ensure_player(update)
     if not player:
         return "Сначала создай персонажа: /start"
@@ -433,71 +447,15 @@ async def run_eat(update: Update) -> str:
     await update.message.reply_text(result, reply_markup=main_keyboard())
 
 
+# Backward-compatible alias for old references
+eat = eat_command
+
+
 async def raid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
         return
     text = await start_raid(update)
     await update.message.reply_text(text, reply_markup=attack_keyboard("raid"))
-
-
-async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if query is None:
-        return
-    await query.answer()
-
-    if query.data is None:
-        return
-
-    if query.data.startswith("pick:"):
-        kagune_key = query.data.split(":", maxsplit=1)[1]
-        text = await create_player_from_choice(update, kagune_key)
-        await query.edit_message_text(text, parse_mode="Markdown")
-        if query.message is not None:
-            await query.message.reply_text("Главное меню открыто ⬇️", reply_markup=main_keyboard())
-            await query.message.reply_text("⚡ Быстрые действия:", reply_markup=actions_keyboard())
-        return
-
-    if query.data.startswith("act:"):
-        parts = query.data.split(":")
-        if len(parts) < 2:
-            return
-
-        action = parts[1]
-        result = ""
-        if action == "hunt" and len(parts) >= 3:
-            result = await run_hunt(update, parts[2])
-        elif action == "raid" and len(parts) >= 3:
-            result = await run_raid(update, parts[2])
-        elif action == "eat":
-            result = await run_eat(update)
-        elif action == "train":
-            result = await run_train(update)
-        elif action == "gacha":
-            result = await run_gacha(update)
-        elif action == "duel":
-            await duel(update, context)
-            return
-
-        if query.message is not None and result:
-            await query.message.reply_text(result, reply_markup=main_keyboard())
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message is None:
-        return
-    text = (
-        "📘 *Команды и кнопки*\n"
-        "• 👤 Профиль / /profile\n"
-        "• 🗡 Охота с тактикой: агрессия, стелс, баланс\n"
-        "• 🚨 Рейд с планом: штурм, саботаж, разведка\n"
-        "• 🍖 Пожирание, 💪 тренировка, 🎰 гача\n"
-        "• ⚔️ /duel — очередь на дуэль с реальным игроком\n"
-        "• /evolve <strength|stamina|hp> — мутация за RC\n"
-        "• /attack <id> — ручная PvP атака\n"
-    )
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_keyboard())
-    await update.message.reply_text("⚡ Быстрые действия:", reply_markup=actions_keyboard())
 
 
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -662,7 +620,7 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "top": top,
         "hunt": hunt,
         "raid": raid,
-        "eat": eat,
+        "eat": eat_command,
         "train": do_train,
         "gacha": gacha,
         "duel": duel,
@@ -683,7 +641,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("profile", profile))
     app.add_handler(CommandHandler("hunt", hunt))
-    app.add_handler(CommandHandler("eat", eat))
+    app.add_handler(CommandHandler("eat", eat_command))
     app.add_handler(CommandHandler("raid", raid))
     app.add_handler(CommandHandler("train", do_train))
     app.add_handler(CommandHandler("evolve", evolve))
