@@ -1,5 +1,6 @@
 import asyncio
 import os
+import random
 import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,15 +22,11 @@ from game import (
     can_eat_human,
     can_hunt,
     can_raid,
-    do_hunt,
     eat_human,
     gacha_pull,
     kagune_help_text,
-    normalize_hunt_style,
     normalize_kagune_key,
-    normalize_raid_style,
     pvp_attack,
-    raid_district,
     render_profile,
     train,
     upgrade_with_rc,
@@ -39,6 +36,10 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "/tmp/game.db")
 DUEL_QUEUE: list[int] = []
+HUNT_SESSIONS: dict[int, dict] = {}
+RAID_SESSIONS: dict[int, dict] = {}
+ZONES = ["head", "body", "legs"]
+ZONE_RU = {"head": "голову", "body": "тело", "legs": "ноги"}
 
 
 def init_db() -> GameDB:
@@ -92,45 +93,40 @@ def ensure_event_loop() -> None:
 def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            ["👤 Профиль", "🏆 Топ игроков"],
-            ["🗡 Охота: Агрессия", "🎯 Охота: Стелс", "⚖️ Охота: Баланс"],
-            ["🚨 Рейд: Штурм", "🧨 Рейд: Саботаж", "👁 Рейд: Разведка"],
+            ["👤 Профиль", "🏆 Топ"],
+            ["🗡 Охота", "🚨 Рейд"],
             ["🍖 Пожирание", "💪 Тренировка", "🎰 Гача"],
-            ["⚔️ Найти дуэль", "❌ Выйти из дуэли", "ℹ️ Помощь"],
+            ["⚔️ Дуэль", "❌ Отмена дуэли", "ℹ️ Помощь"],
         ],
         resize_keyboard=True,
-    )
-
-
-def actions_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🗡 Агрессия", callback_data="act:hunt:aggressive")],
-            [InlineKeyboardButton("🎯 Стелс", callback_data="act:hunt:stealth")],
-            [InlineKeyboardButton("⚖️ Баланс", callback_data="act:hunt:balanced")],
-            [InlineKeyboardButton("🚨 Штурм", callback_data="act:raid:assault")],
-            [InlineKeyboardButton("🧨 Саботаж", callback_data="act:raid:sabotage")],
-            [InlineKeyboardButton("👁 Разведка", callback_data="act:raid:scout")],
-            [InlineKeyboardButton("🍖 Пожирание", callback_data="act:eat")],
-            [InlineKeyboardButton("💪 Тренировка", callback_data="act:train")],
-            [InlineKeyboardButton("🎰 Гача", callback_data="act:gacha")],
-            [InlineKeyboardButton("⚔️ Дуэль", callback_data="act:duel")],
-        ]
     )
 
 
 def kagune_keyboard() -> InlineKeyboardMarkup:
     rows = []
     for key, value in KAGUNE_TYPES.items():
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    f"{value['name']} — {value['description'][:34]}…",
-                    callback_data=f"pick:{key}",
-                )
-            ]
-        )
+        rows.append([InlineKeyboardButton(f"{value['name']} ({key})", callback_data=f"pick:{key}")])
     return InlineKeyboardMarkup(rows)
+
+
+def attack_keyboard(kind: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("👊 Удар в голову", callback_data=f"{kind}:atk:head")],
+            [InlineKeyboardButton("👊 Удар в тело", callback_data=f"{kind}:atk:body")],
+            [InlineKeyboardButton("👊 Удар в ноги", callback_data=f"{kind}:atk:legs")],
+        ]
+    )
+
+
+def defend_keyboard(kind: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🛡 Защитить голову", callback_data=f"{kind}:def:head")],
+            [InlineKeyboardButton("🛡 Защитить тело", callback_data=f"{kind}:def:body")],
+            [InlineKeyboardButton("🛡 Защитить ноги", callback_data=f"{kind}:def:legs")],
+        ]
+    )
 
 
 async def ensure_player(update: Update):
@@ -147,44 +143,280 @@ async def create_player_from_choice(update: Update, kagune_key: str) -> str:
 
     existing = db.get_player(user.id)
     if existing:
-        return "Ты уже в игре. Нажми «👤 Профиль» и продолжай прогрессию."
+        return "Ты уже в игре. Нажми «👤 Профиль» и продолжай играть."
 
     username = user.username or user.full_name
     player = db.create_player(user.id, username, kagune_key)
     return (
         "✅ *Персонаж создан!*\n"
         f"Кагуне: *{player.kagune}*\n"
-        "Тебе открыто главное меню действий.\n"
-        "Начни с кнопки охоты или нажми «⚔️ Найти дуэль»."
+        "Теперь можешь сразу нажать «🗡 Охота» или «🚨 Рейд»."
     )
 
 
-async def run_hunt(update: Update, style: str) -> str:
+def _enemy_title(kind: str) -> str:
+    if kind == "hunt":
+        return random.choice(["Дикий гуль", "Охотник CCG", "Бешеный полугуль"])
+    return random.choice(["Элитный патруль CCG", "Отряд зачистки", "Карательный отряд"])
+
+
+def _init_combat_session(player, kind: str) -> dict:
+    if kind == "hunt":
+        hp = random.randint(45, 75)
+        attack = (10, 22)
+    else:
+        hp = random.randint(70, 120)
+        attack = (14, 28)
+    return {
+        "kind": kind,
+        "enemy": _enemy_title(kind),
+        "enemy_hp": hp,
+        "enemy_max_hp": hp,
+        "enemy_attack": attack,
+        "phase": "attack",
+        "turn": 1,
+        "pending_enemy_zone": None,
+        "log": [],
+    }
+
+
+def _apply_player_attack(player, session: dict, zone: str) -> str:
+    base = player.strength + random.randint(2, max(4, player.stamina))
+    zone_bonus = {"head": 10, "body": 6, "legs": 4}[zone]
+    crit = random.random() < (0.12 if zone == "head" else 0.07)
+    damage = base + zone_bonus + (10 if crit else 0)
+    session["enemy_hp"] = max(0, session["enemy_hp"] - damage)
+    text = f"Ты бьёшь в {ZONE_RU[zone]} и наносишь {damage} урона."
+    if crit:
+        text += " 💥 Критический удар!"
+    return text
+
+
+def _apply_enemy_attack(player, session: dict, defend_zone: str) -> str:
+    enemy_zone = session["pending_enemy_zone"] or random.choice(ZONES)
+    raw = random.randint(*session["enemy_attack"])
+    blocked = defend_zone == enemy_zone
+    damage = max(1, raw // 3) if blocked else raw
+    player.hp = max(1, player.hp - damage)
+
+    text = f"{session['enemy']} атакует в {ZONE_RU[enemy_zone]}. "
+    if blocked:
+        text += f"Ты угадал с блоком! Получено {damage} урона вместо {raw}."
+    else:
+        text += f"Блок мимо. Получено {damage} урона."
+    return text
+
+
+def _combat_status(player, session: dict) -> str:
+    return (
+        f"🎯 Раунд {session['turn']}\n"
+        f"👹 {session['enemy']}: {session['enemy_hp']}/{session['enemy_max_hp']} HP\n"
+        f"❤️ Ты: {player.hp}/{player.max_hp} HP"
+    )
+
+
+def _finish_hunt(player, session: dict) -> str:
+    exp = random.randint(32, 62)
+    yen = random.randint(30, 110)
+    rc = random.randint(8, 22)
+    player.exp += exp
+    player.yen += yen
+    player.rc_cells += rc
+    return f"🏁 Охота завершена! +{exp} EXP, +{yen} ¥, +{rc} RC."
+
+
+def _finish_raid(player, session: dict) -> str:
+    exp = random.randint(52, 95)
+    yen = random.randint(70, 180)
+    rc = random.randint(16, 38)
+    player.exp += exp
+    player.yen += yen
+    player.rc_cells += rc
+    return f"🏁 Рейд завершен! +{exp} EXP, +{yen} ¥, +{rc} RC."
+
+
+async def start_hunt(update: Update) -> str:
     player = await ensure_player(update)
     if not player:
         return "Сначала создай персонажа: /start"
+
+    if player.user_id in HUNT_SESSIONS:
+        return "Ты уже в бою охоты. Заверши текущий бой."
 
     allowed, cooldown_text = can_hunt(player)
     if not allowed:
         return cooldown_text
 
-    result = do_hunt(player, style)
+    player.last_hunt_at = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+    session = _init_combat_session(player, "hunt")
+    HUNT_SESSIONS[player.user_id] = session
     db.save_player(player)
-    return result
+    return (
+        f"🗡 Началась охота! Найден противник: {session['enemy']}.\n"
+        f"{_combat_status(player, session)}\n"
+        "Выбери, куда атаковать:"
+    )
 
 
-async def run_raid(update: Update, style: str) -> str:
+async def start_raid(update: Update) -> str:
     player = await ensure_player(update)
     if not player:
         return "Сначала создай персонажа: /start"
+
+    if player.user_id in RAID_SESSIONS:
+        return "Ты уже в рейде. Заверши текущий бой."
 
     allowed, cooldown_text = can_raid(player)
     if not allowed:
         return cooldown_text
 
-    result = raid_district(player, style)
+    player.last_raid_at = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+    session = _init_combat_session(player, "raid")
+    RAID_SESSIONS[player.user_id] = session
     db.save_player(player)
-    return result
+    return (
+        f"🚨 Начался рейд! Цель: {session['enemy']}.\n"
+        f"{_combat_status(player, session)}\n"
+        "Выбери удар:"
+    )
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if user is None:
+        return "Ошибка: пользователь не найден."
+
+    if context.args:
+        kagune_key = normalize_kagune_key(context.args[0])
+        if kagune_key and kagune_key in KAGUNE_TYPES:
+            text = await create_player_from_choice(update, kagune_key)
+            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_keyboard())
+            return
+
+    existing = db.get_player(user.id)
+    if existing:
+        await update.message.reply_text("С возвращением. Меню ниже.", reply_markup=main_keyboard())
+        await update.message.reply_text(render_profile(existing))
+        return
+
+    intro = (
+        "🩸 *Добро пожаловать в Tokyo Ghoul RPG*\n\n"
+        "*Типы кагуне:*\n"
+        f"{kagune_help_text()}\n\n"
+        "Выбери кагуне кнопкой ниже:"
+    )
+    await update.message.reply_text(intro, parse_mode="Markdown", reply_markup=kagune_keyboard())
+
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+
+    if query.data is None:
+        return
+
+    if query.data.startswith("pick:"):
+        kagune_key = query.data.split(":", maxsplit=1)[1]
+        text = await create_player_from_choice(update, kagune_key)
+        await query.edit_message_text(text, parse_mode="Markdown")
+        if query.message is not None:
+            await query.message.reply_text("Главное меню открыто ⬇️", reply_markup=main_keyboard())
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        return
+
+    mode, action, zone = parts
+    player = await ensure_player(update)
+    if not player:
+        if query.message is not None:
+            await query.message.reply_text("Сначала создай персонажа: /start")
+        return
+
+    sessions = HUNT_SESSIONS if mode == "hunt" else RAID_SESSIONS
+    session = sessions.get(player.user_id)
+    if not session:
+        if query.message is not None:
+            await query.message.reply_text("Бой не найден. Запусти заново через меню.")
+        return
+
+    if action == "atk" and session["phase"] == "attack":
+        attack_text = _apply_player_attack(player, session, zone)
+        if session["enemy_hp"] <= 0:
+            reward = _finish_hunt(player, session) if mode == "hunt" else _finish_raid(player, session)
+            sessions.pop(player.user_id, None)
+            db.save_player(player)
+            if query.message is not None:
+                await query.message.reply_text(f"{attack_text}\n\n✅ Враг повержен!\n{reward}")
+            return
+
+        session["pending_enemy_zone"] = random.choice(ZONES)
+        session["phase"] = "defense"
+        if query.message is not None:
+            await query.message.reply_text(
+                f"{attack_text}\n\n{_combat_status(player, session)}\n"
+                "Противник контратакует. Выбери, что защищать:",
+                reply_markup=defend_keyboard(mode),
+            )
+        return
+
+    if action == "def" and session["phase"] == "defense":
+        defend_text = _apply_enemy_attack(player, session, zone)
+        session["phase"] = "attack"
+        session["turn"] += 1
+
+        if player.hp <= 1:
+            sessions.pop(player.user_id, None)
+            db.save_player(player)
+            if query.message is not None:
+                await query.message.reply_text(
+                    f"{defend_text}\n\n💀 Ты еле выжил и отступил. Бой завершен.",
+                    reply_markup=main_keyboard(),
+                )
+            return
+
+        db.save_player(player)
+        if query.message is not None:
+            await query.message.reply_text(
+                f"{defend_text}\n\n{_combat_status(player, session)}\n"
+                "Твой ход — выбери удар:",
+                reply_markup=attack_keyboard(mode),
+            )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    text = (
+        "📘 Команды:\n"
+        "• 👤 Профиль\n"
+        "• 🗡 Охота — пошаговый бой с NPC\n"
+        "• 🚨 Рейд — тяжелый пошаговый бой\n"
+        "• 🍖 Пожирание, 💪 тренировка, 🎰 гача\n"
+        "• ⚔️ Дуэль — очередь на PvP"
+    )
+    await update.message.reply_text(text, reply_markup=main_keyboard())
+
+
+async def run_hunt(update: Update, style: str) -> str:
+    player = await ensure_player(update)
+    if not player or update.message is None:
+        await update.message.reply_text("Сначала создай персонажа: /start")
+        return
+    await update.message.reply_text(render_profile(player), reply_markup=main_keyboard())
+
+    allowed, cooldown_text = can_hunt(player)
+    if not allowed:
+        return cooldown_text
+
+async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    text = await start_hunt(update)
+    await update.message.reply_text(text, reply_markup=attack_keyboard("hunt"))
 
 
 async def run_eat(update: Update) -> str:
@@ -198,58 +430,14 @@ async def run_eat(update: Update) -> str:
 
     result = eat_human(player)
     db.save_player(player)
-    return result
+    await update.message.reply_text(result, reply_markup=main_keyboard())
 
 
-async def run_train(update: Update) -> str:
-    player = await ensure_player(update)
-    if not player:
-        return "Сначала создай персонажа: /start"
-    result = train(player)
-    db.save_player(player)
-    return result
-
-
-async def run_gacha(update: Update) -> str:
-    player = await ensure_player(update)
-    if not player:
-        return "Сначала создай персонажа: /start"
-    result = gacha_pull(player)
-    db.save_player(player)
-    return result
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if user is None or update.message is None:
+async def raid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
         return
-
-    if context.args:
-        kagune_key = normalize_kagune_key(context.args[0])
-        if kagune_key and kagune_key in KAGUNE_TYPES:
-            text = await create_player_from_choice(update, kagune_key)
-            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_keyboard())
-            await update.message.reply_text("⚡ Быстрые действия:", reply_markup=actions_keyboard())
-            return
-
-    existing = db.get_player(user.id)
-    if existing:
-        await update.message.reply_text(
-            "С возвращением в Токио, гуль.\nНиже меню действий и быстрые кнопки.",
-            reply_markup=main_keyboard(),
-        )
-        await update.message.reply_text(render_profile(existing))
-        await update.message.reply_text("⚡ Выбери действие кнопкой:", reply_markup=actions_keyboard())
-        return
-
-    intro = (
-        "🩸 *Добро пожаловать в Tokyo Ghoul RPG*\n\n"
-        "Ты — гуль в опасном Токио: охоться, рейдь районы, мутируй, собирай предметы и дерись с живыми игроками.\n\n"
-        "*Типы кагуне:*\n"
-        f"{kagune_help_text()}\n\n"
-        "Нажми кнопку ниже для выбора кагуне:"
-    )
-    await update.message.reply_text(intro, parse_mode="Markdown", reply_markup=kagune_keyboard())
+    text = await start_raid(update)
+    await update.message.reply_text(text, reply_markup=attack_keyboard("raid"))
 
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -317,43 +505,9 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not player or update.message is None:
         await update.message.reply_text("Сначала создай персонажа: /start")
         return
-    await update.message.reply_text(render_profile(player), reply_markup=main_keyboard())
-
-
-async def reply_with_menu(update: Update, text: str) -> None:
-    if update.message is None:
-        return
-    await update.message.reply_text(text, reply_markup=main_keyboard())
-
-
-async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message is None:
-        return
-    style = normalize_hunt_style(context.args[0] if context.args else None)
-    result = await run_hunt(update, style)
-    await reply_with_menu(update, result)
-
-
-async def eat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message is None:
-        return
-    result = await run_eat(update)
-    await reply_with_menu(update, result)
-
-
-async def raid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message is None:
-        return
-    style = normalize_raid_style(context.args[0] if context.args else None)
-    result = await run_raid(update, style)
-    await reply_with_menu(update, result)
-
-
-async def do_train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message is None:
-        return
-    result = await run_train(update)
-    await reply_with_menu(update, result)
+    result = train(player)
+    db.save_player(player)
+    await update.message.reply_text(result, reply_markup=main_keyboard())
 
 
 async def evolve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -380,8 +534,9 @@ async def gacha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     result = await run_gacha(update)
     await reply_with_menu(update, result)
 
-    result = await run_gacha(update)
-    await reply_with_menu(update, result)
+    result = gacha_pull(player)
+    db.save_player(player)
+    await update.message.reply_text(result, reply_markup=main_keyboard())
 
 
 async def attack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -434,14 +589,14 @@ async def duel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     opponent_id = next((uid for uid in DUEL_QUEUE if uid != player.user_id), None)
     if opponent_id is None:
-        await message.reply_text("⏳ Поиск соперника... Ты в очереди на дуэль.")
+        await message.reply_text("⏳ Поиск соперника...")
         return
 
     DUEL_QUEUE.remove(player.user_id)
     DUEL_QUEUE.remove(opponent_id)
     opponent = db.get_player(opponent_id)
     if not opponent:
-        await message.reply_text("Соперник исчез из базы. Нажми «⚔️ Найти дуэль» ещё раз.")
+        await message.reply_text("Соперник исчез. Нажми «⚔️ Дуэль» ещё раз.")
         return
 
     result_for_attacker = pvp_attack(player, opponent)
@@ -478,18 +633,14 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 BUTTON_ACTIONS = {
     "👤 Профиль": "profile",
-    "🏆 Топ игроков": "top",
-    "🗡 Охота: Агрессия": "hunt aggressive",
-    "🎯 Охота: Стелс": "hunt stealth",
-    "⚖️ Охота: Баланс": "hunt balanced",
-    "🚨 Рейд: Штурм": "raid assault",
-    "🧨 Рейд: Саботаж": "raid sabotage",
-    "👁 Рейд: Разведка": "raid scout",
+    "🏆 Топ": "top",
+    "🗡 Охота": "hunt",
+    "🚨 Рейд": "raid",
     "🍖 Пожирание": "eat",
     "💪 Тренировка": "train",
     "🎰 Гача": "gacha",
-    "⚔️ Найти дуэль": "duel",
-    "❌ Выйти из дуэли": "duel cancel",
+    "⚔️ Дуэль": "duel",
+    "❌ Отмена дуэли": "duel cancel",
     "ℹ️ Помощь": "help",
 }
 
@@ -517,7 +668,6 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "duel": duel,
         "help": help_command,
     }
-
     await handlers[cmd](update, context)
 
 
