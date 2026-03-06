@@ -246,33 +246,124 @@ def can_raid(player: Player) -> tuple[bool, str]:
     return _check_cooldown(player.last_raid_at, 6, "рейд на район")
 
 
-def do_hunt(player: Player) -> str:
-    enemy_power = random.randint(8, 30)
-    player_power = player.strength + random.randint(0, player.stamina)
+HUNT_STYLES = {
+    "aggressive": {
+        "name": "Агрессия",
+        "aliases": {"агрессия", "агро", "aggro", "aggressive"},
+        "power": (4, 10),
+        "risk": (8, 20),
+        "reward": (1.25, 1.1, 1.15),
+        "story": "Ты врываешься в квартал без колебаний.",
+    },
+    "stealth": {
+        "name": "Стелс",
+        "aliases": {"стелс", "тихо", "stealth"},
+        "power": (-1, 7),
+        "risk": (3, 12),
+        "reward": (1.0, 1.05, 1.3),
+        "story": "Ты выслеживаешь цель в тенях и ждёшь ошибки.",
+    },
+    "balanced": {
+        "name": "Баланс",
+        "aliases": {"баланс", "balanced", "обычно"},
+        "power": (1, 8),
+        "risk": (5, 15),
+        "reward": (1.1, 1.1, 1.1),
+        "story": "Ты действуешь хладнокровно и без лишнего риска.",
+    },
+}
+
+
+RAID_STYLES = {
+    "assault": {
+        "name": "Штурм",
+        "aliases": {"штурм", "assault"},
+        "roll": (4, 12),
+        "damage": (8, 20),
+        "reward": (1.2, 1.15, 1.1),
+        "story": "Ты собираешь боевую группу и идёшь в лобовую атаку.",
+    },
+    "sabotage": {
+        "name": "Саботаж",
+        "aliases": {"саботаж", "sabotage"},
+        "roll": (0, 10),
+        "damage": (5, 14),
+        "reward": (1.0, 1.35, 1.2),
+        "story": "Ты ломаешь склады CCG и вывозишь редкие RC материалы.",
+    },
+    "scout": {
+        "name": "Разведка",
+        "aliases": {"разведка", "scout"},
+        "roll": (2, 11),
+        "damage": (4, 12),
+        "reward": (1.3, 1.0, 1.15),
+        "story": "Ты изучаешь патрули и бьёшь только по уязвимым точкам.",
+    },
+}
+
+
+def normalize_hunt_style(raw_style: str | None) -> str:
+    if not raw_style:
+        return "balanced"
+    key = raw_style.lower().strip()
+    for style_key, style in HUNT_STYLES.items():
+        if key in style["aliases"]:
+            return style_key
+    return "balanced"
+
+
+def normalize_raid_style(raw_style: str | None) -> str:
+    if not raw_style:
+        return "assault"
+    key = raw_style.lower().strip()
+    for style_key, style in RAID_STYLES.items():
+        if key in style["aliases"]:
+            return style_key
+    return "assault"
+
+
+def do_hunt(player: Player, style: str = "balanced") -> str:
+    picked = HUNT_STYLES.get(style, HUNT_STYLES["balanced"])
+    scene = random.choice([
+        "мокрый переулок 20-го района",
+        "крыши возле заброшенного рынка",
+        "подземные тоннели старого метро",
+    ])
+    enemy_power = random.randint(10, 32)
+    player_power = player.strength + random.randint(0, player.stamina) + random.randint(*picked["power"])
     player.last_hunt_at = datetime.now(UTC).isoformat()
 
     if player_power >= enemy_power:
-        reward_exp = random.randint(28, 55)
-        reward_yen = random.randint(20, 90)
-        reward_rc = random.randint(6, 20)
+        reward_exp = int(random.randint(24, 52) * picked["reward"][0])
+        reward_yen = int(random.randint(20, 85) * picked["reward"][1])
+        reward_rc = int(random.randint(8, 22) * picked["reward"][2])
+        hp_cost = random.randint(max(2, picked["risk"][0] - 3), picked["risk"][1])
         player.exp += reward_exp
         player.yen += reward_yen
         player.rc_cells += reward_rc
-        player.hp = max(1, player.hp - random.randint(3, 15))
+        player.hp = max(1, player.hp - hp_cost)
         level_message = apply_level_up(player)
         return (
-            f"🏆 Победа! Сила врага: {enemy_power}, твоя атака: {player_power}.\n"
-            f"+{reward_exp} EXP, +{reward_yen} ¥, +{reward_rc} RC.\n"
-            f"❤️ HP: {player.hp}/{player.max_hp}.\n"
+            f"🕷 Локация: {scene}.\n"
+            f"🎯 Тактика: {picked['name']}. {picked['story']}\n"
+            f"⚔️ Схватка: {player_power} vs {enemy_power}. Победа!\n"
+            f"💰 Добыча: +{reward_exp} EXP, +{reward_yen} ¥, +{reward_rc} RC.\n"
+            f"🩸 Расход сил: -{hp_cost} HP. Текущее HP: {player.hp}/{player.max_hp}.\n"
             f"{level_message}".strip()
         )
 
-    damage = random.randint(10, 24)
+    damage = random.randint(*picked["risk"])
+    consolation = random.randint(2, 8)
+    player.exp += consolation
     player.hp = max(1, player.hp - damage)
+    level_message = apply_level_up(player)
     return (
-        f"💥 Поражение... Сила врага: {enemy_power}, твоя атака: {player_power}.\n"
-        f"Ты потерял {damage} HP.\n"
-        f"❤️ HP: {player.hp}/{player.max_hp}."
+        f"🕷 Локация: {scene}.\n"
+        f"🎯 Тактика: {picked['name']}.\n"
+        f"💥 Ты отступил: {player_power} vs {enemy_power}.\n"
+        f"🧠 За опыт боя: +{consolation} EXP.\n"
+        f"🩸 Потеря: -{damage} HP. Текущее HP: {player.hp}/{player.max_hp}.\n"
+        f"{level_message}".strip()
     )
 
 
@@ -304,30 +395,43 @@ def eat_human(player: Player) -> str:
     )
 
 
-def raid_district(player: Player) -> str:
+def raid_district(player: Player, style: str = "assault") -> str:
+    picked = RAID_STYLES.get(style, RAID_STYLES["assault"])
+    target = random.choice([
+        "склад CCG",
+        "черный рынок 11-го района",
+        "патрульный узел у набережной",
+    ])
     player.last_raid_at = datetime.now(UTC).isoformat()
-    difficulty = random.randint(20, 55)
-    roll = player.strength + player.stamina + random.randint(0, 18)
+    difficulty = random.randint(24, 60)
+    roll = player.strength + player.stamina + random.randint(*picked["roll"])
+
     if roll >= difficulty:
-        yen = random.randint(50, 140)
-        rc = random.randint(20, 45)
-        exp = random.randint(35, 70)
+        yen = int(random.randint(45, 130) * picked["reward"][0])
+        rc = int(random.randint(18, 46) * picked["reward"][1])
+        exp = int(random.randint(32, 72) * picked["reward"][2])
         player.yen += yen
         player.rc_cells += rc
         player.exp += exp
         level_message = apply_level_up(player)
         return (
-            f"🏙 Рейд успешен! ({roll} vs {difficulty})\n"
-            f"Трофеи: +{yen} ¥, +{rc} RC, +{exp} EXP.\n"
+            f"🏙 Цель: {target}.\n"
+            f"🧠 План: {picked['name']}. {picked['story']}\n"
+            f"✅ Рейд успешен: {roll} vs {difficulty}.\n"
+            f"🎁 Трофеи: +{yen} ¥, +{rc} RC, +{exp} EXP.\n"
             f"{level_message}".strip()
         )
 
-    damage = random.randint(10, 28)
+    damage = random.randint(*picked["damage"])
+    partial = random.randint(8, 25)
+    player.rc_cells += partial
     player.hp = max(1, player.hp - damage)
     return (
-        f"🚔 Рейд провален ({roll} vs {difficulty}).\n"
-        f"Получен урон: {damage}.\n"
-        f"❤️ HP: {player.hp}/{player.max_hp}."
+        f"🏙 Цель: {target}.\n"
+        f"🧠 План: {picked['name']}.\n"
+        f"🚔 Рейд сорван: {roll} vs {difficulty}.\n"
+        f"♻️ Удалось вынести +{partial} RC при отступлении.\n"
+        f"🩸 Потеря: -{damage} HP. Текущее HP: {player.hp}/{player.max_hp}."
     )
 
 
