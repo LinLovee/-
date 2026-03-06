@@ -377,6 +377,8 @@ async def evolve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def gacha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
         return
+    result = await run_gacha(update)
+    await reply_with_menu(update, result)
 
     result = await run_gacha(update)
     await reply_with_menu(update, result)
