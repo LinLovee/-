@@ -283,8 +283,15 @@ async def start_raid(update: Update) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if user is None or update.message is None:
-        return
+    if user is None:
+        return "Ошибка: пользователь не найден."
+
+    if context.args:
+        kagune_key = normalize_kagune_key(context.args[0])
+        if kagune_key and kagune_key in KAGUNE_TYPES:
+            text = await create_player_from_choice(update, kagune_key)
+            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_keyboard())
+            return
 
     if context.args:
         kagune_key = normalize_kagune_key(context.args[0])
@@ -316,6 +323,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if query.data is None:
         return
+    await query.answer()
 
     if query.data.startswith("pick:"):
         kagune_key = query.data.split(":", maxsplit=1)[1]
@@ -400,14 +408,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     await update.message.reply_text(text, reply_markup=main_keyboard())
 
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        return
 
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    mode, action, zone = parts
     player = await ensure_player(update)
     if not player or update.message is None:
         await update.message.reply_text("Сначала создай персонажа: /start")
         return
     await update.message.reply_text(render_profile(player), reply_markup=main_keyboard())
 
+    sessions = HUNT_SESSIONS if mode == "hunt" else RAID_SESSIONS
+    session = sessions.get(player.user_id)
+    if not session:
+        if query.message is not None:
+            await query.message.reply_text("Бой не найден. Запусти заново через меню.")
+        return
 
 async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
@@ -418,14 +435,12 @@ async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def eat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     player = await ensure_player(update)
-    if not player or update.message is None:
-        await update.message.reply_text("Сначала создай персонажа: /start")
-        return
+    if not player:
+        return "Сначала создай персонажа: /start"
 
     allowed, cooldown_text = can_eat_human(player)
     if not allowed:
-        await update.message.reply_text(cooldown_text)
-        return
+        return cooldown_text
 
     result = eat_human(player)
     db.save_player(player)
@@ -443,7 +458,7 @@ async def raid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(text, reply_markup=attack_keyboard("raid"))
 
 
-async def do_train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     player = await ensure_player(update)
     if not player or update.message is None:
         await update.message.reply_text("Сначала создай персонажа: /start")
@@ -472,10 +487,10 @@ async def evolve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def gacha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    player = await ensure_player(update)
-    if not player or update.message is None:
-        await update.message.reply_text("Сначала создай персонажа: /start")
+    if update.message is None:
         return
+    result = await run_gacha(update)
+    await reply_with_menu(update, result)
 
     result = gacha_pull(player)
     db.save_player(player)
