@@ -101,6 +101,55 @@ def kagune_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+def init_db() -> GameDB:
+    try:
+        return GameDB(DB_PATH)
+    except sqlite3.OperationalError as err:
+        fallback_path = "/tmp/game.db"
+        print(f"Не удалось открыть БД по пути '{DB_PATH}': {err}")
+        print(f"Переключаюсь на временную БД: {fallback_path}")
+        return GameDB(fallback_path)
+
+
+db = init_db()
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, format, *args):  # noqa: A003
+        return
+
+
+def run_health_server_if_needed() -> None:
+    port_raw = os.getenv("PORT")
+    if not port_raw:
+        return
+
+    try:
+        port = int(port_raw)
+    except ValueError:
+        print(f"Некорректный PORT: {port_raw}. Healthcheck сервер не запущен.")
+        return
+
+    port = int(port_raw)
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"Healthcheck server started on port {port}")
+
+
+def ensure_event_loop() -> None:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
 async def ensure_player(update: Update):
     user = update.effective_user
     if user is None:
