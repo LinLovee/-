@@ -103,6 +103,8 @@ def main_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+
+
 def actions_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -289,6 +291,9 @@ async def create_player_from_choice(update: Update, kagune_key: str) -> str:
     user = update.effective_user
     if user is None:
         return "Ошибка: пользователь не найден."
+    user = update.effective_user
+    if user is None:
+        return "Ошибка: пользователь не найден."
 
     existing = db.get_player(user.id)
     if existing:
@@ -324,6 +329,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     existing = db.get_player(user.id)
     if existing:
         return "Ты уже в игре. Нажми «👤 Профиль» и продолжай прогрессию."
+
+    username = user.username or user.full_name
+    player = db.create_player(user.id, username, kagune_key)
+    return (
+        "✅ *Персонаж создан!*\n"
+        f"Кагуне: *{player.kagune}*\n"
+        "Тебе открыто главное меню действий.\n"
+        "Начни с кнопки охоты или нажми «⚔️ Найти дуэль»."
+    )
 
     username = user.username or user.full_name
     player = db.create_player(user.id, username, kagune_key)
@@ -394,6 +408,15 @@ async def run_hunt(update: Update, style: str) -> str:
     player = await ensure_player(update)
     if not player:
         return "Сначала создай персонажа: /start"
+
+    allowed, cooldown_text = can_hunt(player)
+    if not allowed:
+        return cooldown_text
+
+    result = do_hunt(player, style)
+    db.save_player(player)
+    return result
+
 
     allowed, cooldown_text = can_hunt(player)
     if not allowed:
@@ -569,6 +592,13 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(render_profile(player), reply_markup=main_keyboard())
 
 
+async def reply_with_menu(update: Update, text: str) -> None:
+    if update.message is None:
+        return
+    await update.message.reply_text(text, reply_markup=main_keyboard())
+
+
+
 async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
         return
@@ -584,6 +614,7 @@ async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     style = normalize_hunt_style(context.args[0] if context.args else None)
     result = await run_hunt(update, style)
+    await reply_with_menu(update, result)
     await update.message.reply_text(result, reply_markup=main_keyboard())
 
 
@@ -591,6 +622,7 @@ async def eat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
         return
     result = await run_eat(update)
+    await reply_with_menu(update, result)
     await update.message.reply_text(result, reply_markup=main_keyboard())
 
 
@@ -599,6 +631,7 @@ async def raid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     style = normalize_raid_style(context.args[0] if context.args else None)
     result = await run_raid(update, style)
+    await reply_with_menu(update, result)
     await update.message.reply_text(result, reply_markup=main_keyboard())
 
 
@@ -606,6 +639,7 @@ async def do_train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
         return
     result = await run_train(update)
+    await reply_with_menu(update, result)
     result = train(player)
     db.save_player(player)
     await update.message.reply_text(result, reply_markup=main_keyboard())
@@ -630,6 +664,7 @@ async def gacha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
         return
     result = await run_gacha(update)
+    await reply_with_menu(update, result)
 
     result = gacha_pull(player)
     db.save_player(player)
@@ -707,7 +742,8 @@ async def duel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     DUEL_QUEUE.remove(opponent_id)
     opponent = db.get_player(opponent_id)
     if not opponent:
-        await message.reply_text("Соперник исчез!Нажми «⚔️ Найти дуэль» ещё раз.")
+        await message.reply_text("Соперник исчез! Нажми «⚔️ Найти дуэль» ещё раз.")
+        await message.reply_text("Соперник исчез! Нажми «⚔️ Найти дуэль» ещё раз.")
         await update.message.reply_text("Соперник исчез! Нажми /duel ещё раз.")
         return
 
@@ -769,6 +805,15 @@ BUTTON_ACTIONS = {
 async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None or not update.message.text:
         return
+
+    action = BUTTON_ACTIONS.get(update.message.text.strip())
+    if not action:
+        return
+
+    parts = action.split()
+    cmd = parts[0]
+    context.args = parts[1:]
+
 
     action = BUTTON_ACTIONS.get(update.message.text.strip())
     if not action:
