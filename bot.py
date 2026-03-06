@@ -300,6 +300,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_keyboard())
             return
 
+    if context.args:
+        kagune_key = normalize_kagune_key(context.args[0])
+        if kagune_key and kagune_key in KAGUNE_TYPES:
+            text = await create_player_from_choice(update, kagune_key)
+            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_keyboard())
+            return
+
     existing = db.get_player(user.id)
     if existing:
         await update.message.reply_text("С возвращением. Меню ниже.", reply_markup=main_keyboard())
@@ -323,7 +330,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if query.data is None:
         return
-    await query.answer()
 
     if query.data.startswith("pick:"):
         kagune_key = query.data.split(":", maxsplit=1)[1]
@@ -408,23 +414,56 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     await update.message.reply_text(text, reply_markup=main_keyboard())
 
-    parts = query.data.split(":")
-    if len(parts) != 3:
-        return
-
-    mode, action, zone = parts
-    player = await ensure_player(update)
-    if not player or update.message is None:
-        await update.message.reply_text("Сначала создай персонажа: /start")
-        return
-    await update.message.reply_text(render_profile(player), reply_markup=main_keyboard())
-
     sessions = HUNT_SESSIONS if mode == "hunt" else RAID_SESSIONS
     session = sessions.get(player.user_id)
     if not session:
         if query.message is not None:
             await query.message.reply_text("Бой не найден. Запусти заново через меню.")
         return
+
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    player = await ensure_player(update)
+    if not player or update.message is None:
+        await update.message.reply_text("Сначала создай персонажа: /start")
+        return
+    await update.message.reply_text(render_profile(player), reply_markup=main_keyboard())
+
+    if action == "def" and session["phase"] == "defense":
+        defend_text = _apply_enemy_attack(player, session, zone)
+        session["phase"] = "attack"
+        session["turn"] += 1
+
+        if player.hp <= 1:
+            sessions.pop(player.user_id, None)
+            db.save_player(player)
+            if query.message is not None:
+                await query.message.reply_text(
+                    f"{defend_text}\n\n💀 Ты еле выжил и отступил. Бой завершен.",
+                    reply_markup=main_keyboard(),
+                )
+            return
+
+        db.save_player(player)
+        if query.message is not None:
+            await query.message.reply_text(
+                f"{defend_text}\n\n{_combat_status(player, session)}\n"
+                "Твой ход — выбери удар:",
+                reply_markup=attack_keyboard(mode),
+            )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    text = (
+        "📘 Команды:\n"
+        "• 👤 Профиль\n"
+        "• 🗡 Охота — пошаговый бой с NPC\n"
+        "• 🚨 Рейд — тяжелый пошаговый бой\n"
+        "• 🍖 Пожирание, 💪 тренировка, 🎰 гача\n"
+        "• ⚔️ Дуэль — очередь на PvP"
+    )
+    await update.message.reply_text(text, reply_markup=main_keyboard())
 
 async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
@@ -458,7 +497,7 @@ async def raid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(text, reply_markup=attack_keyboard("raid"))
 
 
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def train_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     player = await ensure_player(update)
     if not player or update.message is None:
         await update.message.reply_text("Сначала создай персонажа: /start")
@@ -466,6 +505,10 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     result = train(player)
     db.save_player(player)
     await update.message.reply_text(result, reply_markup=main_keyboard())
+
+
+# Backward-compatible alias for old references
+do_train = train_command
 
 
 async def evolve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -621,7 +664,7 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "hunt": hunt,
         "raid": raid,
         "eat": eat_command,
-        "train": do_train,
+        "train": train_command,
         "gacha": gacha,
         "duel": duel,
         "help": help_command,
@@ -643,7 +686,7 @@ def main() -> None:
     app.add_handler(CommandHandler("hunt", hunt))
     app.add_handler(CommandHandler("eat", eat_command))
     app.add_handler(CommandHandler("raid", raid))
-    app.add_handler(CommandHandler("train", do_train))
+    app.add_handler(CommandHandler("train", train_command))
     app.add_handler(CommandHandler("evolve", evolve))
     app.add_handler(CommandHandler("gacha", gacha))
     app.add_handler(CommandHandler("attack", attack))
