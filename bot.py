@@ -66,6 +66,7 @@ def run_health_server_if_needed() -> None:
         print(f"Некорректный PORT: {port_raw}. Healthcheck сервер не запущен.")
         return
 
+    port = int(port_raw)
     server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
