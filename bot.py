@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sqlite3
 import threading
@@ -58,11 +59,25 @@ def run_health_server_if_needed() -> None:
     port_raw = os.getenv("PORT")
     if not port_raw:
         return
+
+    try:
+        port = int(port_raw)
+    except ValueError:
+        print(f"Некорректный PORT: {port_raw}. Healthcheck сервер не запущен.")
+        return
+
     port = int(port_raw)
     server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     print(f"Healthcheck server started on port {port}")
+
+
+def ensure_event_loop() -> None:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 async def ensure_player(update: Update):
@@ -256,6 +271,7 @@ def main() -> None:
         raise RuntimeError("Не найден BOT_TOKEN в переменных окружения")
 
     run_health_server_if_needed()
+    ensure_event_loop()
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
