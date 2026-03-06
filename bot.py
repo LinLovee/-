@@ -283,8 +283,8 @@ async def start_raid(update: Update) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if user is None or update.message is None:
-        return
+    if user is None:
+        return "Ошибка: пользователь не найден."
 
     if context.args:
         kagune_key = normalize_kagune_key(context.args[0])
@@ -401,13 +401,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(text, reply_markup=main_keyboard())
 
 
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def run_hunt(update: Update, style: str) -> str:
     player = await ensure_player(update)
     if not player or update.message is None:
         await update.message.reply_text("Сначала создай персонажа: /start")
         return
     await update.message.reply_text(render_profile(player), reply_markup=main_keyboard())
 
+    allowed, cooldown_text = can_hunt(player)
+    if not allowed:
+        return cooldown_text
 
 async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message is None:
@@ -416,16 +419,14 @@ async def hunt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(text, reply_markup=attack_keyboard("hunt"))
 
 
-async def eat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def run_eat(update: Update) -> str:
     player = await ensure_player(update)
-    if not player or update.message is None:
-        await update.message.reply_text("Сначала создай персонажа: /start")
-        return
+    if not player:
+        return "Сначала создай персонажа: /start"
 
     allowed, cooldown_text = can_eat_human(player)
     if not allowed:
-        await update.message.reply_text(cooldown_text)
-        return
+        return cooldown_text
 
     result = eat_human(player)
     db.save_player(player)
@@ -439,7 +440,67 @@ async def raid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(text, reply_markup=attack_keyboard("raid"))
 
 
-async def do_train(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+
+    if query.data is None:
+        return
+
+    if query.data.startswith("pick:"):
+        kagune_key = query.data.split(":", maxsplit=1)[1]
+        text = await create_player_from_choice(update, kagune_key)
+        await query.edit_message_text(text, parse_mode="Markdown")
+        if query.message is not None:
+            await query.message.reply_text("Главное меню открыто ⬇️", reply_markup=main_keyboard())
+            await query.message.reply_text("⚡ Быстрые действия:", reply_markup=actions_keyboard())
+        return
+
+    if query.data.startswith("act:"):
+        parts = query.data.split(":")
+        if len(parts) < 2:
+            return
+
+        action = parts[1]
+        result = ""
+        if action == "hunt" and len(parts) >= 3:
+            result = await run_hunt(update, parts[2])
+        elif action == "raid" and len(parts) >= 3:
+            result = await run_raid(update, parts[2])
+        elif action == "eat":
+            result = await run_eat(update)
+        elif action == "train":
+            result = await run_train(update)
+        elif action == "gacha":
+            result = await run_gacha(update)
+        elif action == "duel":
+            await duel(update, context)
+            return
+
+        if query.message is not None and result:
+            await query.message.reply_text(result, reply_markup=main_keyboard())
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message is None:
+        return
+    text = (
+        "📘 *Команды и кнопки*\n"
+        "• 👤 Профиль / /profile\n"
+        "• 🗡 Охота с тактикой: агрессия, стелс, баланс\n"
+        "• 🚨 Рейд с планом: штурм, саботаж, разведка\n"
+        "• 🍖 Пожирание, 💪 тренировка, 🎰 гача\n"
+        "• ⚔️ /duel — очередь на дуэль с реальным игроком\n"
+        "• /evolve <strength|stamina|hp> — мутация за RC\n"
+        "• /attack <id> — ручная PvP атака\n"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_keyboard())
+    await update.message.reply_text("⚡ Быстрые действия:", reply_markup=actions_keyboard())
+
+
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     player = await ensure_player(update)
     if not player or update.message is None:
         await update.message.reply_text("Сначала создай персонажа: /start")
@@ -468,10 +529,10 @@ async def evolve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def gacha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    player = await ensure_player(update)
-    if not player or update.message is None:
-        await update.message.reply_text("Сначала создай персонажа: /start")
+    if update.message is None:
         return
+    result = await run_gacha(update)
+    await reply_with_menu(update, result)
 
     result = gacha_pull(player)
     db.save_player(player)
