@@ -5,7 +5,6 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
-# Веб-сервер для интеграции с хостингом Render
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -31,6 +30,7 @@ from game import (
     render_profile,
     roll_gacha,
     drink_coffee,
+    start_raid,
 )
 
 UTC = timezone.utc
@@ -40,16 +40,54 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Токен бота (BOT_TOKEN) не задан в конфигурационных файлах.")
 
-# Приоритетно берем строку подключения Postgres из переменной DATABASE_URL, иначе используем локальный файл
 DB_URI = os.getenv("DATABASE_URL", "game.db")
 db = GameDB(DB_URI)
 
 # Внутриигровые сессии и очереди
 DUEL_QUEUE = []
 ACTIVE_HUNT_SESSIONS = {}
+COFFEE_COOLDOWNS = {}
 
 # Инициализируем приложение Telegram Bot
 telegram_app = Application.builder().token(BOT_TOKEN).build()
+
+
+# ================= ПАРСЕР ТЕКСТА КНОПОК И КОМАНД =================
+
+def get_command_type(text: str) -> str | None:
+    val = text.lower().strip()
+    clean_val = val
+    # Очищаем строку от всех возможных эмодзи и пробелов для точного сопоставления
+    for char in ["👤", "🏆", "🗡", "🏢", "☕", "🧬", "🛒", "🍖", "💪", "⚔️", "ℹ️", "❌", "🚨", " "]:
+        clean_val = clean_val.replace(char, "")
+        
+    if clean_val in ["профиль", "profile", "персонаж", "stats", "статы"]:
+        return "profile"
+    if clean_val in ["топигроков", "топ", "top", "лидеры", "рейтинг"]:
+        return "top"
+    if clean_val in ["наохоту", "охота", "hunt"]:
+        return "hunt"
+    if clean_val in ["досказаказов", "заказы", "квесты", "доска", "заказ", "контракты"]:
+        return "quest"
+    if clean_val in ["пожирание", "съесть", "еда", "eat", "человек", "кушать"]:
+        return "eat"
+    if clean_val in ["кофейня", "кофе", "антейку", "coffee"]:
+        return "coffee"
+    if clean_val in ["гача", "gacha", "рулетка"]:
+        return "gacha"
+    if clean_val in ["тренировка", "треня", "спортзал", "качаться", "train"]:
+        return "train"
+    if clean_val in ["магазин", "рынок", "шоп", "shop"]:
+        return "shop"
+    if clean_val in ["рейд", "raid", "штурм"]:
+        return "raid"
+    if clean_val in ["искатьдуэль", "дуэль", "арена", "pvp", "duel", "найтидуэль", "бой"]:
+        return "duel_search"
+    if clean_val in ["отменадуэли", "отменапоиска", "отменитьдуэль", "отменадуэль", "отмена", "cancel"]:
+        return "duel_cancel"
+    if clean_val in ["инфо", "информация", "помощь", "help", "info", "справка"]:
+        return "info"
+    return None
 
 
 # ================= ХЭНДЛЕРЫ КОМАНД И КНОПОК =================
@@ -199,10 +237,23 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("Используй /start для инициализации персонажа.")
         return
 
-    if text == "👤 Профиль":
+    cmd = get_command_type(text)
+
+    if not cmd:
+        await update.message.reply_text("❌ Команда не распознана. Воспользуйтесь кнопками меню или напишите «помощь».")
+        return
+
+    if cmd == "profile":
         await update.message.reply_text(render_profile(player), parse_mode="Markdown")
 
-    elif text == "🗡 На Охоту":
+    elif cmd == "top":
+        leaders = db.top_players(10)
+        msg = "🏆 *Рейтинг сильнейших гулей города:*\n\n"
+        for idx, p in enumerate(leaders, 1):
+            msg += f"{idx}. *{p.username}* — Уровень: {p.level} | RC-клетки: {p.rc_cells}\n"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    elif cmd == "hunt":
         if user.id in ACTIVE_HUNT_SESSIONS:
             await update.message.reply_text("Вы уже находитесь в состоянии боя!", reply_markup=combat_keyboard())
             return
@@ -228,7 +279,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             reply_markup=combat_keyboard()
         )
 
-    elif text == "🏢 Доска Заказов":
+    elif cmd == "quest":
         is_ready, seconds = check_cooldown(player.last_quest_at, timedelta(minutes=10))
         if not is_ready:
             await update.message.reply_text(f"⏳ Доступных контрактов пока нет. Зайдите через: {format_time(seconds)}")
@@ -246,7 +297,20 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         ]
         await update.message.reply_text(f"📋 *Выполнение контракта:*\n\n{random.choice(quests)}\n💰 Вы получили оплату: +{reward_yen} ¥", parse_mode="Markdown")
 
-    elif text == "🍖 Пожирание":
+    elif cmd == "raid":
+        is_ready, seconds = check_cooldown(player.last_raid_at, timedelta(hours=4))
+        if not is_ready:
+            await update.message.reply_text(f"⏳ Слишком высокая активность патрулей в районе CCG. Рейд будет доступен через: {format_time(seconds)}")
+            return
+        if player.hp < 55:
+            await update.message.reply_text("❌ Вы слишком слабы для штурма штаба! Сначала восстановите здоровье в Кофейне.")
+            return
+            
+        res = start_raid(player)
+        db.save_player(player)
+        await update.message.reply_text(res, parse_mode="Markdown")
+
+    elif cmd == "eat":
         is_ready, seconds = check_cooldown(player.last_eat_at, timedelta(hours=2))
         if not is_ready:
             await update.message.reply_text(f"⏳ Вы еще не проголодались настолько сильно. Кулдаун: {format_time(seconds)}")
@@ -255,21 +319,26 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         db.save_player(player)
         await update.message.reply_text(res, parse_mode="Markdown")
 
-    elif text == "☕ Кофейня":
-        is_ready, seconds = check_cooldown(player.last_raid_at, timedelta(minutes=10))
-        if not is_ready:
-            await update.message.reply_text(f"⏳ Кофеин ещё действует. Вы сможете посетить заведение снова через: {format_time(seconds)}")
+    elif cmd == "coffee":
+        now = datetime.now(UTC)
+        last_coffee = COFFEE_COOLDOWNS.get(user.id)
+        if last_coffee and now < last_coffee + timedelta(minutes=10):
+            seconds = int((last_coffee + timedelta(minutes=10) - now).total_seconds())
+            await update.message.reply_text(f"⏳ Кофеин ещё действует. Вы сможете посетить заведение повторно через: {format_time(seconds)}")
             return
+            
         res = drink_coffee(player)
+        if "❌" not in res:
+            COFFEE_COOLDOWNS[user.id] = now
         db.save_player(player)
         await update.message.reply_text(res, parse_mode="Markdown")
 
-    elif text == "🧬 Гача":
+    elif cmd == "gacha":
         res = roll_gacha(player)
         db.save_player(player)
         await update.message.reply_text(res, parse_mode="Markdown")
 
-    elif text == "💪 Тренировка":
+    elif cmd == "train":
         cost = 40 + (player.level * 5)
         if player.yen < cost:
             await update.message.reply_text(f"❌ Недостаточно средств. Стоимость тренировки для твоего уровня: {cost} ¥")
@@ -280,32 +349,25 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         db.save_player(player)
         await update.message.reply_text(f"🏋️‍♂️ Вы провели изнурительную тренировку в спортзале.\nХарактеристики Силы и Выносливости выросли! Списано: {cost} ¥")
 
-    elif text == "🛒 Магазин":
+    elif cmd == "shop":
         buttons = [
             [InlineKeyboardButton(f"{v['name']} ({v['cost']} ¥)", callback_data=f"buy:{k}")]
             for k, v in ITEMS_SHOP.items()
         ]
         await update.message.reply_text("🛒 *Черный рынок Токио.*\nЗдесь вы можете приобрести постоянные улучшения за наличные йены:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
-    elif text == "🏆 Топ Игроков":
-        leaders = db.top_players(10)
-        msg = "🏆 *Рейтинг сильнейших гулей города:*\n\n"
-        for idx, p in enumerate(leaders, 1):
-            msg += f"{idx}. *{p.username}* — Уровень: {p.level} | RC-клетки: {p.rc_cells}\n"
-        await update.message.reply_text(msg, parse_mode="Markdown")
-
-    elif text == "⚔️ Искать Дуэль":
+    elif cmd == "duel_search":
         if user.id in DUEL_QUEUE:
-            await update.message.reply_text("Вы уже находитесь в поиске оппонента для PvP.")
+            await update.message.reply_text("Вы уже находитесь в очереди. Для отмены отправьте команду «отмена».")
             return
             
         if player.hp < int(player.max_hp * 0.4):
-            await update.message.reply_text("❌ У вас слишком мало здоровья для аренных боев! Подлечитесь на Охоте, Пожирании или в Кофейне.")
+            await update.message.reply_text("❌ У вас слишком мало здоровья для аренных боев! Подлечитесь на Охоте, в Кофейне или на Пожирании.")
             return
 
         DUEL_QUEUE.append(user.id)
         if len(DUEL_QUEUE) < 2:
-            await update.message.reply_text("🔍 Поиск достойного соперника по всему Токио... Ожидайте.")
+            await update.message.reply_text("🔍 Поиск достойного соперника по всему Токио...\nВы можете отменить поиск в любой момент, отправив слово «отмена».")
             return
 
         p1_id = DUEL_QUEUE.pop(0)
@@ -324,11 +386,24 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             except Exception:
                 pass
 
-    elif text == "ℹ️ Инфо":
+    elif cmd == "duel_cancel":
+        if user.id in DUEL_QUEUE:
+            DUEL_QUEUE.remove(user.id)
+            await update.message.reply_text("❌ Поиск оппонента для дуэли успешно отменен. Вы вышли из очереди.")
+        else:
+            await update.message.reply_text("Вы не находились в очереди поиска дуэлей.")
+
+    elif cmd == "info":
         await update.message.reply_text(
             "🩸 *Tokyo Ghoul RPG Bot* 🩸\n\n"
-            "Выживайте на улицах, сражайтесь с агентами CCG и другими игроками, улучшайте свой Кагуне.\n\n"
-            "💡 _Совет: stamina уменьшает входящий урон и дает пассивный шанс увернуться от атак в PvP!_",
+            "Выживайте на улицах Токио, сражайтесь с агентами CCG и другими игроками, улучшайте свой Кагуне.\n\n"
+            "💡 *Полезные подсказки:*\n"
+            "• `Выносливость` снижает входящий урон и дает пассивный шанс увернуться от атак в PvP.\n"
+            "• При критическом HP воспользуйтесь *Кофейней «Антейку»* (всего за 15 ¥ восстановит 40 HP).\n"
+            "• Участвуйте в опасных *Рейдах* раз в 4 часа за ценные трофеи, но помните о рисках!\n"
+            "• Вы можете отменить поиск арены в любой момент, написав в чат слово *«отмена»*.\n\n"
+            "🎮 *Текстовые команды (можно писать текстом в чат):*\n"
+            "➔ `профиль`, `топ`, `охота`, `заказы`, `рейд`, `кофейня`, `гача`, `магазин`, `пожирание`, `тренировка`, `дуэль`, `отмена`, `помощь`",
             parse_mode="Markdown"
         )
 
@@ -345,7 +420,7 @@ def main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             ["👤 Профиль", "🏆 Топ Игроков"],
-            ["🗡 На Охоту", "🏢 Доска Заказов"],
+            ["🗡 На Охоту", "🏢 Доска Заказов", "🚨 Рейд"],
             ["☕ Кофейня", "🧬 Гача", "🛒 Магазин"],
             ["🍖 Пожирание", "💪 Тренировка", "⚔️ Искать Дуэль"],
             ["ℹ️ Инфо"]
@@ -365,16 +440,13 @@ def combat_keyboard() -> InlineKeyboardMarkup:
 
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI):
-    # Этот блок срабатывает строго при старте веб-сервера Uvicorn
-    # Бот инициализируется внутри активного Event Loop'а веб-сервера
     await telegram_app.initialize()
     await telegram_app.start()
     await telegram_app.updater.start_polling()
     print("🤖 Telegram-бот успешно запущен в общем цикле с FastAPI!")
     
-    yield  # В этой точке веб-сервер принимает входящие запросы
+    yield
     
-    # Этот блок срабатывает при выключении сервера на Render
     await telegram_app.updater.stop()
     await telegram_app.stop()
     await telegram_app.shutdown()
