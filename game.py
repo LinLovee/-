@@ -5,7 +5,6 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-# Пробуем импортировать библиотеку для работы с PostgreSQL
 try:
     import psycopg2
 except ImportError:
@@ -82,7 +81,6 @@ class Player:
 class GameDB:
     def __init__(self, db_uri: str) -> None:
         self.db_uri = db_uri
-        # Автоматическое определение типа СУБД по строке подключения
         self.is_postgres = db_uri.startswith("postgres://") or db_uri.startswith("postgresql://")
         self._init_db()
 
@@ -100,7 +98,6 @@ class GameDB:
             return conn
 
     def _init_db(self) -> None:
-        # Для Telegram ID используем BIGINT, так как они выходят за пределы стандартных 32-битных чисел
         query = """
         CREATE TABLE IF NOT EXISTS players (
             user_id BIGINT PRIMARY KEY,
@@ -140,7 +137,6 @@ class GameDB:
                     conn.execute("ALTER TABLE players ADD COLUMN last_quest_at TEXT")
 
     def _q(self, sql: str) -> str:
-        # Адаптация плейсхолдеров (? для SQLite, %s для PostgreSQL)
         if self.is_postgres:
             return sql.replace("?", "%s")
         return sql
@@ -251,7 +247,7 @@ def apply_level_up(player: Player) -> str:
         player.strength += 4
         player.stamina += 3
         player.rc_cells += 15
-        messages.append(f"⬆️ *Уровень повышен до {player.level}!* Характеристики улучшены, получено +15 RC клеток.")
+        messages.append(f"🔺 *Уровень повышен до {player.level}!* Характеристики улучшены, получено +15 RC клеток.")
     return "\n".join(messages)
 
 def check_cooldown(last_event_at: str | None, cooldown_delta: timedelta) -> tuple[bool, int]:
@@ -313,13 +309,13 @@ def eat_human(player: Player) -> str:
 
 def roll_gacha(player: Player) -> str:
     if player.rc_cells < 100:
-        return "❌ Недостаточно RC-клеток. Для одного прокрута на черном рынке необходимо 100 🧪 клеток."
+        return "❌ Недостаточно RC-клеток. Для одного прокрута требуется 100 🧪 клеток."
     
     player.rc_cells -= 100
     player.gacha_pulls += 1
     roll = random.random()
     
-    if roll < 0.05:  # 5% шанс на Легендарный предмет
+    if roll < 0.05:
         player.legendary_drops += 1
         player.max_hp += 80
         player.hp = player.max_hp
@@ -330,7 +326,7 @@ def roll_gacha(player: Player) -> str:
             "🔺 Макс. HP навсегда увеличено на *+80*!\n"
             "🔺 Сила навсегда увеличена на *+12*!"
         )
-    elif roll < 0.35:  # 30% Редкий
+    elif roll < 0.35:
         stat_choice = random.choice(["strength", "stamina"])
         gain = random.randint(3, 5)
         if stat_choice == "strength":
@@ -343,7 +339,7 @@ def roll_gacha(player: Player) -> str:
             "✨ *Редкий исход!*\n"
             f"Вы выпили очищенную RC-эмульсию. Ваша *{stat_name}* увеличилась на *+{gain}*!"
         )
-    else:  # 65% Обычный
+    else:
         yen_gain = random.randint(100, 250)
         player.yen += yen_gain
         return (
@@ -358,14 +354,46 @@ def drink_coffee(player: Player) -> str:
     player.yen -= 15
     heal = 40
     player.hp = min(player.max_hp, player.hp + heal)
-    player.last_raid_at = datetime.now(UTC).isoformat()  # Поле 'last_raid_at' переиспользуем под кулдаун кофе
-    
     return (
         "☕ *Кофейня Антейку*\n"
         "Йошимура лично приготовил вам чашку качественного кофе. Напряжение спало, а голод притупился.\n\n"
         f"❤️ Восстановлено: +{heal} HP (Текущее: {player.hp}/{player.max_hp})\n"
         "💰 Потрачено: 15 ¥"
     )
+
+def start_raid(player: Player) -> str:
+    player.last_raid_at = datetime.now(UTC).isoformat()
+    
+    hp_loss = random.randint(30, 50)
+    if player.hp <= hp_loss:
+        player.hp = int(player.max_hp * 0.1)
+        stolen_yen = min(player.yen, random.randint(10, 30))
+        player.yen -= stolen_yen
+        return (
+            "🚨 *Провал рейда на штаб-квартиру CCG!*\n\n"
+            "Вы попали в засаду следователей особого класса. "
+            f"Вас тяжело ранили (осталось 10% HP) и вы потеряли {stolen_yen} ¥ при поспешном отступлении."
+        )
+    
+    player.hp -= hp_loss
+    rc_reward = random.randint(50, 100)
+    yen_reward = random.randint(150, 300)
+    exp_reward = random.randint(50, 90)
+    
+    player.rc_cells += rc_reward
+    player.yen += yen_reward
+    player.exp += exp_reward
+    
+    lvl_msg = apply_level_up(player)
+    return (
+        "🚨 *Успешный Рейд на штаб CCG!*\n"
+        "Вы прорвались сквозь баррикады следователей и взломали секретную лабораторию.\n\n"
+        f"🩸 Полученный урон: -{hp_loss} HP (Текущее: {player.hp}/{player.max_hp})\n"
+        f"🧬 Получено: +{rc_reward} RC-клеток\n"
+        f"💰 Трофеи: +{yen_reward} ¥\n"
+        f"📈 Опыт: +{exp_reward} EXP\n\n"
+        f"{lvl_msg}"
+    ).strip()
 
 def pvp_attack(attacker: Player, defender: Player) -> str:
     if attacker.user_id == defender.user_id:
