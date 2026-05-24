@@ -3,7 +3,9 @@ import os
 import random
 import asyncio
 from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager
 
+# Веб-сервер для интеграции с хостингом Render
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -35,6 +37,8 @@ UTC = timezone.utc
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("Токен бота (BOT_TOKEN) не задан в конфигурационных файлах.")
 
 # Приоритетно берем строку подключения Postgres из переменной DATABASE_URL, иначе используем локальный файл
 DB_URI = os.getenv("DATABASE_URL", "game.db")
@@ -44,36 +48,12 @@ db = GameDB(DB_URI)
 DUEL_QUEUE = []
 ACTIVE_HUNT_SESSIONS = {}
 
-# ================= FASTAPI ДЛЯ RENDER (БЕСПЛАТНЫЙ ТАРИФ) =================
-api = FastAPI()
-
-@api.get("/")
-def read_root():
-    return {"status": "Бот активен, база данных подключена, веб-сервер отвечает!"}
+# Инициализируем приложение Telegram Bot
+telegram_app = Application.builder().token(BOT_TOKEN).build()
 
 
-# ================= КЛАВИАТУРЫ И ИНТЕРФЕЙС =================
-def main_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [
-            ["👤 Профиль", "🏆 Топ Игроков"],
-            ["🗡 На Охоту", "🏢 Доска Заказов"],
-            ["☕ Кофейня", "🧬 Гача", "🛒 Магазин"],
-            ["🍖 Пожирание", "💪 Тренировка", "⚔️ Искать Дуэль"],
-            ["ℹ️ Инфо"]
-        ],
-        resize_keyboard=True
-    )
+# ================= ХЭНДЛЕРЫ КОМАНД И КНОПОК =================
 
-def combat_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💥 Атака в Голову", callback_data="fight:hit:head")],
-        [InlineKeyboardButton("🛡 Защита Корпуса", callback_data="fight:hit:body")],
-        [InlineKeyboardButton("🏃 Попытка Отхода", callback_data="fight:run")]
-    ])
-
-
-# ================= ХЭНДЛЕРЫ КОМАНД =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not user:
@@ -276,7 +256,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(res, parse_mode="Markdown")
 
     elif text == "☕ Кофейня":
-        # Используем last_raid_at для трекинга кулдауна похода в кофейню
         is_ready, seconds = check_cooldown(player.last_raid_at, timedelta(minutes=10))
         if not is_ready:
             await update.message.reply_text(f"⏳ Кофеин ещё действует. Вы сможете посетить заведение снова через: {format_time(seconds)}")
@@ -354,28 +333,65 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
 
 
+# Регистрируем хэндлеры
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CallbackQueryHandler(handle_callback))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+
+
+# ================= КЛАВИАТУРЫ И ИНТЕРФЕЙС =================
+
+def main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            ["👤 Профиль", "🏆 Топ Игроков"],
+            ["🗡 На Охоту", "🏢 Доска Заказов"],
+            ["☕ Кофейня", "🧬 Гача", "🛒 Магазин"],
+            ["🍖 Пожирание", "💪 Тренировка", "⚔️ Искать Дуэль"],
+            ["ℹ️ Инфо"]
+        ],
+        resize_keyboard=True
+    )
+
+def combat_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💥 Атака в Голову", callback_data="fight:hit:head")],
+        [InlineKeyboardButton("🛡 Защита Корпуса", callback_data="fight:hit:body")],
+        [InlineKeyboardButton("🏃 Попытка Отхода", callback_data="fight:run")]
+    ])
+
+
+# ================= FASTAPI С LIFESPAN ДЛЯ ОБЩЕГО EVENT LOOP =================
+
+@asynccontextmanager
+async def lifespan(fastapi_app: FastAPI):
+    # Этот блок срабатывает строго при старте веб-сервера Uvicorn
+    # Бот инициализируется внутри активного Event Loop'а веб-сервера
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.updater.start_polling()
+    print("🤖 Telegram-бот успешно запущен в общем цикле с FastAPI!")
+    
+    yield  # В этой точке веб-сервер принимает входящие запросы
+    
+    # Этот блок срабатывает при выключении сервера на Render
+    await telegram_app.updater.stop()
+    await telegram_app.stop()
+    await telegram_app.shutdown()
+    print("🛑 Telegram-бот успешно остановлен.")
+
+
+api = FastAPI(lifespan=lifespan)
+
+@api.get("/")
+def read_root():
+    return {"status": "Бот активен, база данных подключена, веб-сервер отвечает!"}
+
+
 def main() -> None:
-    if not BOT_TOKEN:
-        raise ValueError("Токен бота (BOT_TOKEN) не задан в конфигурационных файлах.")
-
-    # 1. Инициализируем Telegram Bot
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
-
-    # 2. Асинхронно запускаем бота параллельно с FastAPI в одном Event Loop
-    loop = asyncio.get_event_loop()
-    loop.create_task(app.initialize())
-    loop.create_task(app.updater.start_polling())
-    loop.create_task(app.start())
-    print("🤖 Telegram-бот успешно инициализирован в фоновом режиме!")
-
-    # 3. Запускаем Uvicorn на порту, который требует хостинг Render (по умолчанию 10000)
     port = int(os.getenv("PORT", 10000))
-    print(f"🌐 FastAPI сервер запущен и слушает порт {port}...")
-    uvicorn.run(api, host="0.0.0.0", port=port, log_level="warning")
+    print(f"🌐 Инициализация FastAPI на порту {port}...")
+    uvicorn.run(api, host="0.0.0.0", port=port, log_level="info")
 
 
 if __name__ == "__main__":
