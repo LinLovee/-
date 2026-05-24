@@ -1,5 +1,6 @@
 # game.py
 import os
+import json
 import random
 import sqlite3
 from dataclasses import dataclass
@@ -14,25 +15,49 @@ UTC = timezone.utc
 
 KAGUNE_TYPES = {
     "rinkaku": {
-        "name": "Ринкаку",
-        "description": "Щупальца с чудовищной регенерацией и высоким уроном. Идеален для агрессии.",
+        "name": "Ринкаку (Чешуйчатые щупальца)",
+        "description": "Свирепый тип кагуне в виде чешуйчатых щупалец. Отличается невероятной взрывной силой, пробивающей даже самую плотную броню, и высочайшей скоростью регенерации клеток. Однако связи между RC-клетками у этого типа крайне хрупкие, что делает его носителя уязвимым.",
         "bonus": {"strength": 4, "stamina": 1, "max_hp": 15},
     },
     "ukaku": {
-        "name": "Укаку",
-        "description": "Скоростной кагуне дальнего боя. Больше манёвра и уклонения.",
+        "name": "Укаку (Кристаллические крылья)",
+        "description": "Высокоскоростной тип, напоминающий яркие кристаллизованные крылья. Позволяет вести непрерывный обстрел шипами на дистанции и мгновенно уворачиваться от выпадов врага. Основной недостаток — колоссальный расход энергии и быстрая утомляемость.",
         "bonus": {"strength": 2, "stamina": 4, "max_hp": 10},
     },
     "koukaku": {
-        "name": "Коукаку",
-        "description": "Тяжёлый бронированный тип. Ниже мобильность, но мощная защита.",
+        "name": "Коукаку (Тяжелый доспех)",
+        "description": "Чрезвычайно плотный металлический кагуне, формирующийся в виде щита, бура или тяжелого доспеха. Гарантирует абсолютную защиту от холодного и огнестрельного оружия. Повышает выносливость и живучесть, но сильно сковывает движения.",
         "bonus": {"strength": 2, "stamina": 5, "max_hp": 25},
     },
     "bikaku": {
-        "name": "Бикаку",
-        "description": "Сбалансированный тип: стабильный урон, контроль и гибкость.",
+        "name": "Бикаку (Тактический хвост)",
+        "description": "Сбалансированный кагуне в форме мощного хвоста. Универсальное оружие без явных слабых мест: обеспечивает прекрасный контроль дистанции, скоординированную защиту и сокрушительные контратаки. Идеальный тактический выбор для любого стиля боя.",
         "bonus": {"strength": 3, "stamina": 3, "max_hp": 15},
     },
+}
+
+# Справочник уникальных навыков для каждого типа Кагуне (базовые коэффициенты)
+KAGUNE_SKILLS = {
+    "rinkaku": [
+        {"id": "s1", "name": "🩸 Быстрая регенерация", "desc": "Концентрирует RC-клетки, мгновенно восстанавливая здоровье в бою.", "cost_rc": 15, "value": 25},
+        {"id": "s2", "name": "⚔️ Тройной разрез", "desc": "Сокрушительный скоординированный удар щупальцами.", "cost_rc": 20, "value": 1.5},
+        {"id": "s3", "name": "💀 Безумие Какуджа", "desc": "Вхождение в полу-форму монстра, нанося огромный урон и исцеляя тело.", "cost_rc": 40, "value": 2.2}
+    ],
+    "ukaku": [
+        {"id": "s1", "name": "✨ Кристаллический залп", "desc": "Выстреливает веером острых перьев по уязвимым точкам.", "cost_rc": 15, "value": 1.3},
+        {"id": "s2", "name": "💨 Реактивный уворот", "desc": "Мгновенно снижает урон от ответного удара противника.", "cost_rc": 15, "value": 1.0},
+        {"id": "s3", "name": "⚡ Ураганный обстрел", "desc": "Сокрушающий непрерывный шторм из сотен RC-кристаллов.", "cost_rc": 35, "value": 2.0}
+    ],
+    "koukaku": [
+        {"id": "s1", "name": "🛡 Тяжелый барьер", "desc": "Формирует щит из закаленной стали, снижающий урон.", "cost_rc": 15, "value": 0.3},
+        {"id": "s2", "name": "🌪 Спиральный таран", "desc": "Превращает защитный сегмент в тяжелый пробивающий бур.", "cost_rc": 20, "value": 1.4},
+        {"id": "s3", "name": "🌋 Обвал брони", "desc": "Использует массу доспеха для проведения сокрушительной атаки.", "cost_rc": 40, "value": 2.5}
+    ],
+    "bikaku": [
+        {"id": "s1", "name": "🌀 Сметающий взмах", "desc": "Широкий круговой удар хвостом, ослабляющий противника.", "cost_rc": 15, "value": 1.2},
+        {"id": "s2", "name": "⚔️ Тактическое парирование", "desc": "Перехватывает инициативу, снижая урон и восстанавливая HP.", "cost_rc": 15, "value": 1.1},
+        {"id": "s3", "name": "🐉 Комбо Смерти", "desc": "Безупречная серия быстрых, точно рассчитанных ударов.", "cost_rc": 35, "value": 2.1}
+    ]
 }
 
 KAGUNE_ALIASES = {
@@ -56,6 +81,16 @@ def normalize_kagune_key(raw_key: str) -> str | None:
         return key
     return KAGUNE_ALIASES.get(key)
 
+def get_kagune_key_by_name(name: str) -> str:
+    for key, info in KAGUNE_TYPES.items():
+        if info["name"].split(" ")[0].lower() == name.split(" ")[0].lower():
+            return key
+    return "rinkaku"
+
+def get_skill_upgrade_cost(current_level: int) -> int | None:
+    costs = {1: 120, 2: 250, 3: 500, 4: 1000}
+    return costs.get(current_level, None)
+
 @dataclass
 class Player:
     user_id: int
@@ -77,6 +112,15 @@ class Player:
     last_eat_at: str | None
     last_raid_at: str | None
     last_quest_at: str | None
+    skills_json: str | None = '{}'
+
+    def get_skills_dict(self) -> dict:
+        if not self.skills_json:
+            return {"s1": 1, "s2": 1, "s3": 1}
+        try:
+            return json.loads(self.skills_json)
+        except Exception:
+            return {"s1": 1, "s2": 1, "s3": 1}
 
 class GameDB:
     def __init__(self, db_uri: str) -> None:
@@ -118,7 +162,8 @@ class GameDB:
             last_hunt_at TEXT,
             last_eat_at TEXT,
             last_raid_at TEXT,
-            last_quest_at TEXT
+            last_quest_at TEXT,
+            skills_json TEXT NOT NULL DEFAULT '{}'
         )
         """
         if self.is_postgres:
@@ -126,6 +171,10 @@ class GameDB:
             try:
                 with conn.cursor() as cur:
                     cur.execute(query)
+                    # Проверяем и накатываем структуру столбцов
+                    cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='players' AND column_name='skills_json'")
+                    if not cur.fetchone():
+                        cur.execute("ALTER TABLE players ADD COLUMN skills_json TEXT NOT NULL DEFAULT '{}'")
                 conn.commit()
             finally:
                 conn.close()
@@ -135,6 +184,8 @@ class GameDB:
                 columns = {row["name"] for row in conn.execute("PRAGMA table_info(players)").fetchall()}
                 if "last_quest_at" not in columns:
                     conn.execute("ALTER TABLE players ADD COLUMN last_quest_at TEXT")
+                if "skills_json" not in columns:
+                    conn.execute("ALTER TABLE players ADD COLUMN skills_json TEXT NOT NULL DEFAULT '{}'")
 
     def _q(self, sql: str) -> str:
         if self.is_postgres:
@@ -193,8 +244,8 @@ class GameDB:
         chosen = KAGUNE_TYPES[kagune_key]
         bonus = chosen["bonus"]
         sql = """
-        INSERT INTO players (user_id, username, faction, kagune, strength, stamina, max_hp, hp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO players (user_id, username, faction, kagune, strength, stamina, max_hp, hp, skills_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         params = (
             user_id,
@@ -204,7 +255,8 @@ class GameDB:
             12 + bonus["strength"],
             10 + bonus["stamina"],
             100 + bonus["max_hp"],
-            100 + bonus["max_hp"]
+            100 + bonus["max_hp"],
+            '{"s1": 1, "s2": 1, "s3": 1}'
         )
         self._execute(sql, params)
         return self.get_player(user_id)
@@ -215,7 +267,8 @@ class GameDB:
         SET username = ?, faction = ?, level = ?, exp = ?, hp = ?,
             max_hp = ?, strength = ?, stamina = ?, yen = ?, kagune = ?,
             rc_cells = ?, humans_eaten = ?, gacha_pulls = ?, legendary_drops = ?,
-            last_hunt_at = ?, last_eat_at = ?, last_raid_at = ?, last_quest_at = ?
+            last_hunt_at = ?, last_eat_at = ?, last_raid_at = ?, last_quest_at = ?,
+            skills_json = ?
         WHERE user_id = ?
         """
         params = (
@@ -223,7 +276,7 @@ class GameDB:
             player.max_hp, player.strength, player.stamina, player.yen, player.kagune,
             player.rc_cells, player.humans_eaten, player.gacha_pulls, player.legendary_drops,
             player.last_hunt_at, player.last_eat_at, player.last_raid_at, player.last_quest_at,
-            player.user_id
+            player.skills_json, player.user_id
         )
         self._execute(sql, params)
 
@@ -271,6 +324,7 @@ def format_time(seconds: int) -> str:
 
 def render_profile(player: Player) -> str:
     req_exp = exp_to_level_up(player.level)
+    skills = player.get_skills_dict()
     return (
         f"👤 *Профиль игрока: {player.username}*\n"
         f"🏷 Фракция: {player.faction}\n"
@@ -278,8 +332,12 @@ def render_profile(player: Player) -> str:
         f"📊 *Характеристики:*\n"
         f"▪️ Уровень: {player.level}  `[{player.exp}/{req_exp} EXP]`\n"
         f"❤️ Здоровье: {player.hp}/{player.max_hp} HP\n"
-        f"⚔️ Сила: {player.strength}\n"
-        f"🛡 Выносливость: {player.stamina}\n\n"
+        f"⚔️ Сила (Атака): {player.strength}\n"
+        f"🛡 Выносливость (Броня): {player.stamina}\n\n"
+        f"⚡ *Степени развития умений:*\n"
+        f"🔸 Навык 1: `Lvl {skills.get('s1', 1)}/5`\n"
+        f"🔸 Навык 2: `Lvl {skills.get('s2', 1)}/5`\n"
+        f"🔸 Ультимейт: `Lvl {skills.get('s3', 1)}/5`\n\n"
         f"💰 Баланс: {player.yen} ¥\n"
         f"🧪 RC-клетки: {player.rc_cells}\n"
         f"🥩 Поедание людей: {player.humans_eaten}\n"
@@ -394,6 +452,144 @@ def start_raid(player: Player) -> str:
         f"📈 Опыт: +{exp_reward} EXP\n\n"
         f"{lvl_msg}"
     ).strip()
+
+
+# ================= СИСТЕМА ПОШАГОВОГО БОЯ С УЧЕТОМ УРОВНЕЙ УМЕНИЙ =================
+
+def execute_combat_turn(player: Player, session: dict, action: str) -> dict | str:
+    key = get_kagune_key_by_name(player.kagune)
+    skills_cfg = KAGUNE_SKILLS[key]
+    player_skills = player.get_skills_dict()
+    
+    player_dmg = 0
+    mob_dmg = max(2, session["mob_atk"] - (player.stamina // 2))
+    skill_activated_msg = ""
+    
+    if action == "basic":
+        player_dmg = max(5, player.strength + random.randint(-3, 5))
+        skill_activated_msg = f"⚔️ Вы нанесли базовый удар кагуне, нанеся *{player_dmg}* урон."
+        
+    elif action == "skill1":
+        skill = skills_cfg[0]
+        lvl = player_skills.get("s1", 1)
+        scale = 1.0 + (lvl - 1) * 0.15 # Каждая ступень увеличивает урон/эффективность на 15%
+        
+        if player.rc_cells < skill["cost_rc"]:
+            return f"❌ Недостаточно RC-клеток! Для навыка требуется {skill['cost_rc']} 🧪 клеток."
+        player.rc_cells -= skill["cost_rc"]
+        
+        if key == "rinkaku":
+            heal_val = int(skill["value"] * scale)
+            player.hp = min(player.max_hp, player.hp + heal_val)
+            player_dmg = max(5, int(player.strength * 0.8 * scale))
+            skill_activated_msg = (
+                f"🌀 Применено умение *{skill['name']}* `Lvl {lvl}` (-{skill['cost_rc']}🧪):\n"
+                f"🧬 Восстановлено *+{heal_val} HP*. Нанесено *{player_dmg}* урон."
+            )
+        elif key == "ukaku":
+            player_dmg = max(5, int((player.strength * skill["value"] * scale) + random.randint(1, 4)))
+            skill_activated_msg = (
+                f"🌀 Применено умение *{skill['name']}* `Lvl {lvl}` (-{skill['cost_rc']}🧪):\n"
+                f"✨ Кристаллический перьевой веер нанес *{player_dmg}* урон."
+            )
+        elif key == "koukaku":
+            player_dmg = max(5, int(player.strength * 0.6 * scale))
+            shield_factor = max(0.1, skill["value"] - (lvl - 1) * 0.05) # Снижает урон сильнее на высоких уровнях
+            mob_dmg = max(1, int(mob_dmg * shield_factor))
+            skill_activated_msg = (
+                f"🌀 Применено умение *{skill['name']}* `Lvl {lvl}` (-{skill['cost_rc']}🧪):\n"
+                f"🛡 Сверхпрочный металлический барьер заблокировал удар. Получено всего -{mob_dmg} HP. Нанесено *{player_dmg}* урон."
+            )
+        elif key == "bikaku":
+            player_dmg = max(5, int(player.strength * skill["value"] * scale))
+            debuff_factor = max(0.2, 0.5 - (lvl - 1) * 0.075)
+            mob_dmg = max(1, int(mob_dmg * debuff_factor))
+            skill_activated_msg = (
+                f"🌀 Применено умение *{skill['name']}* `Lvl {lvl}` (-{skill['cost_rc']}🧪):\n"
+                f"🌪 Хвостовой взмах сбил темп противника. Получено всего -{mob_dmg} HP. Нанесено *{player_dmg}* урон."
+            )
+            
+    elif action == "skill2":
+        skill = skills_cfg[1]
+        lvl = player_skills.get("s2", 1)
+        scale = 1.0 + (lvl - 1) * 0.15
+        
+        if player.rc_cells < skill["cost_rc"]:
+            return f"❌ Недостаточно RC-клеток! Для навыка требуется {skill['cost_rc']} 🧪 клеток."
+        player.rc_cells -= skill["cost_rc"]
+        
+        if key == "rinkaku":
+            player_dmg = max(5, int((player.strength * skill["value"] * scale) + random.randint(2, 6)))
+            skill_activated_msg = (
+                f"🌀 Применено умение *{skill['name']}* `Lvl {lvl}` (-{skill['cost_rc']}🧪):\n"
+                f"⚔️ Тройной веер щупалец пронзил врага насквозь на *{player_dmg}* урон."
+            )
+        elif key == "ukaku":
+            player_dmg = max(5, int(player.strength * skill["value"] * scale))
+            evade_factor = max(0.2, 0.5 - (lvl - 1) * 0.075)
+            mob_dmg = max(1, int(mob_dmg * evade_factor))
+            skill_activated_msg = (
+                f"🌀 Применено умение *{skill['name']}* `Lvl {lvl}` (-{skill['cost_rc']}🧪):\n"
+                f"💨 Скоростной рывок увел от атаки. Получено всего -{mob_dmg} HP. Нанесено *{player_dmg}* урон."
+            )
+        elif key == "koukaku":
+            player_dmg = max(5, int((player.strength * skill["value"] * scale) + random.randint(4, 8)))
+            skill_activated_msg = (
+                f"🌀 Применено умение *{skill['name']}* `Lvl {lvl}` (-{skill['cost_rc']}🧪):\n"
+                f"🌪 Пробивающий доспешный вихревой бур нанес *{player_dmg}* урон."
+            )
+        elif key == "bikaku":
+            player_dmg = max(5, int(player.strength * skill["value"] * scale))
+            heal_val = 15 + (lvl - 1) * 5
+            player.hp = min(player.max_hp, player.hp + heal_val)
+            skill_activated_msg = (
+                f"🌀 Применено умение *{skill['name']}* `Lvl {lvl}` (-{skill['cost_rc']}🧪):\n"
+                f"⚔️ Парирование восстановило *+{heal_val} HP*. Нанесено *{player_dmg}* ответного урона."
+            )
+            
+    elif action == "ult":
+        skill = skills_cfg[2]
+        lvl = player_skills.get("s3", 1)
+        scale = 1.0 + (lvl - 1) * 0.15
+        
+        if player.rc_cells < skill["cost_rc"]:
+            return f"❌ Недостаточно RC-клеток! Для ультимейта требуется {skill['cost_rc']} 🧪 клеток."
+        player.rc_cells -= skill["cost_rc"]
+        
+        player_dmg = max(10, int((player.strength * skill["value"] * scale) + random.randint(8, 15)))
+        
+        if key == "rinkaku":
+            heal_val = 35 + (lvl - 1) * 10
+            player.hp = min(player.max_hp, player.hp + heal_val)
+            skill_activated_msg = (
+                f"💀 *АКТИВИРОВАНА ПОЛУКАКУДЖА* `Lvl {lvl}` (-{skill['cost_rc']}🧪):\n"
+                f"🩸 Чудовищное безумие восстановило вам *+{heal_val} HP* и уничтожило цель на *{player_dmg}* урон!"
+            )
+        elif key == "ukaku":
+            skill_activated_msg = (
+                f"💀 *УЛЬТИМЕЙТ: {skill['name']}* `Lvl {lvl}` (-{skill['cost_rc']}🧪):\n"
+                f"⚡ Опустошительный кристаллический обстрел искромсал врага на *{player_dmg}* урон!"
+            )
+        elif key == "koukaku":
+            skill_activated_msg = (
+                f"💀 *УЛЬТИМЕЙТ: {skill['name']}* `Lvl {lvl}` (-{skill['cost_rc']}🧪):\n"
+                f"🌋 Сокрушительный обвал брони сверху раздавил кости противника на *{player_dmg}* урон!"
+            )
+        elif key == "bikaku":
+            skill_activated_msg = (
+                f"💀 *УЛЬТИМЕЙТ: {skill['name']}* `Lvl {lvl}` (-{skill['cost_rc']}🧪):\n"
+                f"🐉 Серия ультимативных тактических выпадов хвостом нанесла врагу *{player_dmg}* урон!"
+            )
+
+    session["mob_hp"] -= player_dmg
+    if session["mob_hp"] > 0:
+        player.hp = max(0, player.hp - mob_dmg)
+        
+    return {
+        "player_dmg": player_dmg,
+        "mob_dmg": mob_dmg,
+        "msg": skill_activated_msg
+    }
 
 def pvp_attack(attacker: Player, defender: Player) -> str:
     if attacker.user_id == defender.user_id:
